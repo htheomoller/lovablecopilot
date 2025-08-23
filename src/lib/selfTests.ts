@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { supabase } from '@/integrations/supabase/client';
 import { logBreadcrumb, getBreadcrumbs } from './devlog';
 
 export interface TestResult {
@@ -149,7 +149,7 @@ export const testProfileUpsert = async (): Promise<TestResult> => {
       name: 'Profile Upsert Test',
       passed: true,
       message: 'Profile upserted successfully',
-      details: { profileId: data.id }
+      details: { profileId: data?.id }
     };
   } catch (err) {
     return {
