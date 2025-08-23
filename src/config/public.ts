@@ -9,19 +9,18 @@ export function getEnv() {
   const dev = !!import.meta.env.DEV;
   const host = typeof window !== 'undefined' ? window.location.host : '';
 
-  // Lovable preview/editor hosts we should treat as non-prod
+  // Lovable preview/editor style hosts we should treat as preview
   const isLovablePreviewHost =
     /(^preview--.*\.lovable\.app$)/.test(host) ||
     /(^id-preview--.*\.lovable\.app$)/.test(host) ||
     /(^[a-f0-9-]+\.lovableproject\.com$)/.test(host) ||
     host.includes('localhost');
 
-  // If we're framed (e.g., inside the Lovable editor), force preview mode
+  // If framed (editor), also treat as preview
   const framed = typeof window !== 'undefined' && isFramed();
 
   const preview = !dev && (isLovablePreviewHost || framed);
   const prod = !dev && !preview;
-
   return { dev, preview, prod, host, framed } as const;
 }
 
