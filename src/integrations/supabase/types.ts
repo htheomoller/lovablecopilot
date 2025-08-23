@@ -14,13 +14,102 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      dev_breadcrumbs: {
+        Row: {
+          created_at: string
+          details: Json | null
+          id: string
+          owner_id: string
+          scope: string
+          summary: string
+          tags: string[] | null
+        }
+        Insert: {
+          created_at?: string
+          details?: Json | null
+          id?: string
+          owner_id: string
+          scope: string
+          summary: string
+          tags?: string[] | null
+        }
+        Update: {
+          created_at?: string
+          details?: Json | null
+          id?: string
+          owner_id?: string
+          scope?: string
+          summary?: string
+          tags?: string[] | null
+        }
+        Relationships: []
+      }
+      ledger_milestones: {
+        Row: {
+          created_at: string
+          duration_days: number | null
+          id: string
+          name: string
+          owner_id: string
+          project: string
+          start_date: string | null
+          status: string | null
+        }
+        Insert: {
+          created_at?: string
+          duration_days?: number | null
+          id: string
+          name: string
+          owner_id: string
+          project: string
+          start_date?: string | null
+          status?: string | null
+        }
+        Update: {
+          created_at?: string
+          duration_days?: number | null
+          id?: string
+          name?: string
+          owner_id?: string
+          project?: string
+          start_date?: string | null
+          status?: string | null
+        }
+        Relationships: []
+      }
+      profiles: {
+        Row: {
+          created_at: string
+          email: string
+          id: string
+          name: string | null
+          website: string | null
+        }
+        Insert: {
+          created_at?: string
+          email: string
+          id: string
+          name?: string | null
+          website?: string | null
+        }
+        Update: {
+          created_at?: string
+          email?: string
+          id?: string
+          name?: string | null
+          website?: string | null
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      create_sample_milestones: {
+        Args: { user_id: string }
+        Returns: undefined
+      }
     }
     Enums: {
       [_ in never]: never
