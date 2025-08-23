@@ -1,7 +1,19 @@
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { useAuth } from "@/contexts/AuthContext";
+import { Link } from "react-router-dom";
 
 const Index = () => {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-hero">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gradient-hero">
       <div className="container mx-auto px-4">
@@ -14,9 +26,19 @@ const Index = () => {
               </div>
               <span className="text-xl font-semibold text-foreground">CoPilot</span>
             </div>
-            <Button variant="outline" size="sm">
-              Get Started
-            </Button>
+            {user ? (
+              <Link to="/dashboard">
+                <Button variant="outline" size="sm">
+                  Dashboard
+                </Button>
+              </Link>
+            ) : (
+              <Link to="/auth">
+                <Button variant="outline" size="sm">
+                  Get Started
+                </Button>
+              </Link>
+            )}
           </nav>
         </header>
 
@@ -35,12 +57,25 @@ const Index = () => {
             </p>
             
             <div className="flex flex-col sm:flex-row gap-4 justify-center items-center mb-20">
-              <Button 
-                size="lg" 
-                className="bg-gradient-primary hover:shadow-elegant transform hover:scale-105 transition-all duration-300"
-              >
-                Start Your Journey
-              </Button>
+              {user ? (
+                <Link to="/dashboard">
+                  <Button 
+                    size="lg" 
+                    className="bg-gradient-primary hover:shadow-elegant transform hover:scale-105 transition-all duration-300"
+                  >
+                    Go to Dashboard
+                  </Button>
+                </Link>
+              ) : (
+                <Link to="/auth">
+                  <Button 
+                    size="lg" 
+                    className="bg-gradient-primary hover:shadow-elegant transform hover:scale-105 transition-all duration-300"
+                  >
+                    Start Your Journey
+                  </Button>
+                </Link>
+              )}
               <Button variant="outline" size="lg" className="group">
                 Learn More
                 <span className="ml-2 transform group-hover:translate-x-1 transition-transform duration-200">→</span>
