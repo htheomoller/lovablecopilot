@@ -18,12 +18,44 @@ serve(async (req) => {
       throw new Error('OPENAI_API_KEY is not configured');
     }
 
-    const { prompt } = await req.json();
+    const { prompt, state } = await req.json();
     if (!prompt) {
       throw new Error('Prompt is required');
     }
 
     console.log('Generating text for prompt:', prompt);
+
+    // Create style instruction based on answer_style
+    let styleInstruction = '';
+    if (state?.answer_style) {
+      switch (state.answer_style) {
+        case 'eli5':
+          styleInstruction = 'Explain very simply, with analogies, like I\'m 5.';
+          break;
+        case 'intermediate':
+          styleInstruction = 'Explain practically, for a non-technical founder with some no-code experience.';
+          break;
+        case 'developer':
+          styleInstruction = 'Explain technically, with precise code details, as if to a developer.';
+          break;
+      }
+    }
+
+    // Build messages array with optional style instruction
+    const messages = [
+      { 
+        role: 'system', 
+        content: 'You are a helpful assistant that generates high-quality content based on user prompts. Be creative and detailed in your responses.' 
+      }
+    ];
+
+    // Add style instruction if provided
+    if (styleInstruction) {
+      messages.push({ role: 'system', content: styleInstruction });
+    }
+
+    // Add user prompt
+    messages.push({ role: 'user', content: prompt });
 
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
@@ -33,13 +65,7 @@ serve(async (req) => {
       },
       body: JSON.stringify({
         model: 'gpt-4.1-2025-04-14',
-        messages: [
-          { 
-            role: 'system', 
-            content: 'You are a helpful assistant that generates high-quality content based on user prompts. Be creative and detailed in your responses.' 
-          },
-          { role: 'user', content: prompt }
-        ],
+        messages: messages,
         max_completion_tokens: 1000,
       }),
     });
@@ -56,9 +82,9 @@ serve(async (req) => {
     const generatedText = data.choices[0].message.content;
 
     return new Response(JSON.stringify({ 
-      success: true,
-      generatedText,
-      model: 'gpt-4.1-2025-04-14'
+      reply: generatedText,
+      kv: {},
+      milestones: []
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
