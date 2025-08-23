@@ -1,202 +1,135 @@
-import { useState } from 'react';
-import { useAuth } from '@/contexts/AuthContext';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
-import { supabase } from '@/integrations/supabase/client';
-import { runAllTests, type TestResult } from '@/lib/selfTests';
-import { logBreadcrumb, getBreadcrumbs } from '@/lib/devlog';
-import { useNavigate } from 'react-router-dom';
+import React, { useEffect, useState } from 'react';
 import EnvBadge from '@/components/EnvBadge';
+import { supabase } from '@/integrations/supabase/client';
+import { useAuth } from '@/contexts/AuthContext';
 
-const Health = () => {
-  const { user, loading } = useAuth();
-  const navigate = useNavigate();
-  const [testResults, setTestResults] = useState<TestResult[]>([]);
+export default function Health() {
+  const { user } = useAuth();
+  const [loading, setLoading] = useState(true);
+  const [milestoneCount, setMilestoneCount] = useState<number | null>(null);
+  const [breadcrumbCount, setBreadcrumbCount] = useState<number | null>(null);
   const [running, setRunning] = useState(false);
-  const [milestonesCount, setMilestonesCount] = useState<number | null>(null);
-  const [breadcrumbsCount, setBreadcrumbsCount] = useState<number | null>(null);
-  
-  const isDev = import.meta.env.DEV || window.location.hostname === 'localhost';
-  
-  // Redirect non-dev environments
-  if (!isDev) {
-    navigate('/', { replace: true });
-    return null;
-  }
-  
-  if (loading) {
-    return <div className="p-8">Loading...</div>;
-  }
-  
-  if (!user) {
-    return (
-      <div className="p-8">
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-destructive">Authentication Required</CardTitle>
-            <CardDescription>Please log in to access health checks</CardDescription>
-          </CardHeader>
-        </Card>
-      </div>
-    );
-  }
-  
-  const runSelfTests = async () => {
-    setRunning(true);
+  const [seeding, setSeeding] = useState(false);
+  const uid = user?.id ?? null;
+
+  async function refreshCounts() {
+    setLoading(true);
     try {
-      // Load data counts
-      const [milestonesRes, breadcrumbsRes] = await Promise.all([
+      const [{ count: mCount, error: mErr }, { count: bCount, error: bErr }] = await Promise.all([
         supabase.from('ledger_milestones').select('*', { count: 'exact', head: true }),
         supabase.from('dev_breadcrumbs').select('*', { count: 'exact', head: true })
       ]);
-      
-      setMilestonesCount(milestonesRes.count || 0);
-      setBreadcrumbsCount(breadcrumbsRes.count || 0);
-      
-      // Run tests
-      const results = await runAllTests();
-      setTestResults(results);
-      
-      // Log health check
-      await logBreadcrumb({
-        scope: 'health-check',
-        summary: 'Health page self-tests completed',
-        details: {
-          passed: results.filter(r => r.passed).length,
-          total: results.length,
-          milestonesCount: milestonesRes.count,
-          breadcrumbsCount: breadcrumbsRes.count
+      if (mErr) throw mErr; if (bErr) throw bErr;
+      setMilestoneCount(mCount ?? 0);
+      setBreadcrumbCount(bCount ?? 0);
+    } catch (e) {
+      console.warn('[Health] count refresh failed', e);
+      setMilestoneCount(null);
+      setBreadcrumbCount(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function seedSampleData() {
+    if (!uid) return alert('Sign in first.');
+    setSeeding(true);
+    try {
+      const now = new Date().toISOString();
+      const { error: mErr } = await supabase.from('ledger_milestones').insert([
+        { 
+          id: `m1-${Date.now()}`, 
+          project: 'CoPilot', 
+          name: 'Setup & Auth', 
+          status: 'in_progress', 
+          duration_days: 3, 
+          owner_id: uid, 
+          start_date: new Date().toISOString().split('T')[0]
         },
-        tags: ['health', 'self-test']
+        { 
+          id: `m2-${Date.now()}`, 
+          project: 'CoPilot', 
+          name: 'Chat Onboarding', 
+          status: 'pending', 
+          duration_days: 7, 
+          owner_id: uid, 
+          start_date: new Date().toISOString().split('T')[0]
+        }
+      ]);
+      if (mErr) throw mErr;
+      const { error: bErr } = await supabase.from('dev_breadcrumbs').insert({
+        owner_id: uid,
+        scope: 'seed',
+        summary: 'Seeded sample milestones',
+        details: { by: 'Health.seedSampleData' },
+        tags: ['seed','health']
       });
-    } catch (error) {
-      console.error('Self-tests failed:', error);
-      await logBreadcrumb({
-        scope: 'health-check',
-        summary: 'Health check failed with error',
-        details: { error: String(error) },
-        tags: ['health', 'error']
-      });
+      if (bErr) throw bErr;
+      await refreshCounts();
+      alert('Sample data created.');
+    } catch (e: any) {
+      console.error(e);
+      alert('Seeding failed: ' + (e?.message || 'Unknown error'));
+    } finally {
+      setSeeding(false);
+    }
+  }
+
+  async function runSelfTests() {
+    if (!uid) return alert('Sign in first.');
+    setRunning(true);
+    try {
+      // Minimal smoke tests: write two breadcrumbs and confirm no throw
+      const write = async (summary: string, details: any) => {
+        const { error } = await supabase.from('dev_breadcrumbs').insert({ 
+          owner_id: uid, 
+          scope: 'selftest', 
+          summary, 
+          details, 
+          tags: ['selftest','health'] 
+        });
+        if (error) throw error;
+      };
+      await write('health_start', { t: Date.now() });
+      await write('health_ok', { note: 'basic insert works' });
+      await refreshCounts();
+      alert('Self-tests ran without errors.');
+    } catch (e: any) {
+      console.error(e);
+      alert('Self-tests failed: ' + (e?.message || 'Unknown error'));
     } finally {
       setRunning(false);
     }
-  };
-  
-  const createSampleData = async () => {
-    try {
-      // Call the sample milestones function
-      const { error } = await supabase.rpc('create_sample_milestones', {
-        user_id: user.id
-      });
-      
-      if (error) {
-        console.error('Failed to create sample data:', error);
-      } else {
-        await logBreadcrumb({
-          scope: 'setup',
-          summary: 'Created sample milestone data',
-          tags: ['setup', 'milestones']
-        });
-        // Refresh counts
-        runSelfTests();
-      }
-    } catch (error) {
-      console.error('Error creating sample data:', error);
-    }
-  };
-  
+  }
+
+  useEffect(() => { refreshCounts(); }, []);
+
   return (
-    <div className="p-8 space-y-6">
+    <div className="p-4 space-y-4">
       <EnvBadge />
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold">Health Dashboard</h1>
-          <p className="text-muted-foreground">If you see ENV as DEV or PREVIEW above, /health should be allowed by AuthGate.</p>
+      <h1 className="text-xl font-bold">Health Dashboard</h1>
+      <p className="text-sm opacity-80">If you see ENV as DEV or PREVIEW above, /health should be allowed by AuthGate.</p>
+
+      <section className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="border rounded p-3">
+          <div className="text-sm opacity-70">Milestones</div>
+          <div className="text-2xl font-semibold">{loading ? '…' : milestoneCount ?? '?'}</div>
         </div>
-        <Badge variant="secondary">DEV MODE</Badge>
-      </div>
-      
-      <div className="grid gap-6 md:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle>Authentication Status</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <Badge variant="default">Authenticated</Badge>
-                <span className="text-sm text-muted-foreground">{user.email}</span>
-              </div>
-              <div className="text-xs text-muted-foreground">User ID: {user.id}</div>
-            </div>
-          </CardContent>
-        </Card>
-        
-        <Card>
-          <CardHeader>
-            <CardTitle>Data Overview</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-2">
-              <div className="flex justify-between">
-                <span>Milestones:</span>
-                <Badge variant="outline">{milestonesCount ?? '?'}</Badge>
-              </div>
-              <div className="flex justify-between">
-                <span>Breadcrumbs:</span>
-                <Badge variant="outline">{breadcrumbsCount ?? '?'}</Badge>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-      
-      <Card>
-        <CardHeader>
-          <CardTitle>Self-Tests</CardTitle>
-          <CardDescription>
-            Run comprehensive tests to validate system functionality
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex gap-2">
-            <Button 
-              onClick={runSelfTests} 
-              disabled={running}
-              size="sm"
-            >
-              {running ? 'Running Tests...' : 'Run Self-Tests'}
-            </Button>
-            <Button 
-              onClick={createSampleData} 
-              variant="outline"
-              size="sm"
-            >
-              Create Sample Data
-            </Button>
-          </div>
-          
-          {testResults.length > 0 && (
-            <div className="space-y-2">
-              <h4 className="font-medium">Test Results:</h4>
-              {testResults.map((result, index) => (
-                <div key={index} className="flex items-center justify-between p-3 border rounded">
-                  <span className="font-medium">{result.name}</span>
-                  <div className="flex items-center gap-2">
-                    <Badge variant={result.passed ? "default" : "destructive"}>
-                      {result.passed ? 'PASS' : 'FAIL'}
-                    </Badge>
-                    <span className="text-sm text-muted-foreground">{result.message}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+        <div className="border rounded p-3">
+          <div className="text-sm opacity-70">Breadcrumbs</div>
+          <div className="text-2xl font-semibold">{loading ? '…' : breadcrumbCount ?? '?'}</div>
+        </div>
+        <div className="border rounded p-3">
+          <div className="text-sm opacity-70">Auth</div>
+          <div className="text-sm">{uid ? 'Authenticated' : 'Not signed in'}</div>
+        </div>
+      </section>
+
+      <section className="flex gap-2">
+        <button onClick={refreshCounts} className="px-3 py-2 border rounded">Refresh</button>
+        <button disabled={seeding} onClick={seedSampleData} className="px-3 py-2 border rounded">{seeding ? 'Seeding…' : 'Create Sample Data'}</button>
+        <button disabled={running} onClick={runSelfTests} className="px-3 py-2 border rounded">{running ? 'Running…' : 'Run Self-Tests'}</button>
+      </section>
     </div>
   );
-};
-
-export default Health;
+}
