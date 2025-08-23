@@ -1,22 +1,28 @@
-/**
- * Utility functions for iframe detection and navigation
- * Used to handle OAuth flows in Lovable editor preview
- */
-
-/**
- * Check if the current window is running inside an iframe
- * @returns true if window is framed, false otherwise
- */
+// Utility functions for iframe detection and safe navigation
 export const isFramed = (): boolean => {
-  return window.self !== window.top;
+  try { return window.self !== window.top; } catch { return true; }
 };
 
 /**
- * Open a URL in the top-level window (breaks out of iframe)
- * @param url - The URL to navigate to
+ * Try to navigate top-level; if blocked by iframe sandbox, open a new tab; else fallback to self.
+ * Returns one of: 'top' | 'blank' | 'self'
  */
-export const openTop = (url: string): void => {
-  if (window.top) {
-    window.top.location.href = url;
+export function escapeTo(url: string): 'top' | 'blank' | 'self' {
+  // 1) Try top-level navigation
+  try {
+    if (window.top && window.top !== window.self) {
+      (window.top as Window).location.href = url;
+      return 'top';
+    }
+  } catch {
+    // blocked by cross-origin / sandbox; continue to fallback
   }
-};
+
+  // 2) Fallback: open new tab (most reliable in iframe contexts)
+  const w = window.open(url, '_blank', 'noopener,noreferrer');
+  if (w) return 'blank';
+
+  // 3) Last resort: navigate the current (framed) window
+  window.location.href = url;
+  return 'self';
+}

@@ -8,7 +8,7 @@ import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
 import { Navigate } from 'react-router-dom';
 import { toast } from '@/hooks/use-toast';
-import { isFramed, openTop } from '@/lib/iframe';
+import { isFramed, escapeTo } from '@/lib/iframe';
 
 const Auth = () => {
   const { user, loading } = useAuth();
@@ -27,7 +27,7 @@ const Auth = () => {
       
       // If running in iframe (Lovable editor), break out to public preview
       if (isFramed()) {
-        openTop('https://preview--lovablecopilot.lovable.app');
+        escapeTo('https://preview--lovablecopilot.lovable.app');
         return;
       }
       
