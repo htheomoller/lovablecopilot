@@ -101,6 +101,33 @@ export type Database = {
         }
         Relationships: []
       }
+      project_guidelines: {
+        Row: {
+          created_at: string | null
+          id: string
+          k: string
+          updated_at: string | null
+          user_id: string
+          v: Json
+        }
+        Insert: {
+          created_at?: string | null
+          id?: string
+          k: string
+          updated_at?: string | null
+          user_id: string
+          v: Json
+        }
+        Update: {
+          created_at?: string | null
+          id?: string
+          k?: string
+          updated_at?: string | null
+          user_id?: string
+          v?: Json
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
