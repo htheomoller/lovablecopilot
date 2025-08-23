@@ -6,6 +6,19 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+function getStyleInstruction(answerStyle?: string): string {
+  switch (answerStyle) {
+    case 'eli5':
+      return 'Explain very simply, with analogies, like I\'m 5.';
+    case 'intermediate':
+      return 'Explain practically, for a non-technical founder with some no-code experience.';
+    case 'developer':
+      return 'Explain technically, with precise code details, as if to a developer.';
+    default:
+      return 'Explain clearly and practically.';
+  }
+}
+
 serve(async (req) => {
   // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
@@ -18,28 +31,74 @@ serve(async (req) => {
       throw new Error('OPENAI_API_KEY is not configured');
     }
 
-    const { prompt, state } = await req.json();
+    const { prompt, state, mode, answer_style, answers } = await req.json();
+    
+    // Handle roadmap mode
+    if (mode === 'roadmap') {
+      if (!answers) {
+        throw new Error('Answers are required for roadmap mode');
+      }
+      
+      console.log('Generating roadmap for:', answers);
+      
+      // Build roadmap prompt
+      const roadmapPrompt = `Create a detailed project roadmap based on these answers:
+- App idea: ${answers.idea}
+- Target audience: ${answers.audience}  
+- Key features: ${Array.isArray(answers.features) ? answers.features.join(', ') : answers.features}
+- Privacy level: ${answers.privacy}
+- Authentication: ${answers.auth}
+- Daily work capacity: ${answers.deep_work_hours} hours
+
+Generate a friendly roadmap explanation that outlines the development phases, key milestones, and realistic timeline. Be encouraging and specific about what each phase involves.`;
+
+      const styleInstruction = getStyleInstruction(answer_style);
+      const messages = [
+        { role: 'system', content: 'You are a technical project advisor creating personalized development roadmaps.' },
+        { role: 'system', content: styleInstruction },
+        { role: 'user', content: roadmapPrompt }
+      ];
+
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${openAIApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          messages: messages,
+          max_completion_tokens: 1500,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.text();
+        console.error('OpenAI API error:', errorData);
+        throw new Error(`OpenAI API error: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      const reply = data?.choices?.[0]?.message?.content || '';
+      
+      return new Response(JSON.stringify({ 
+        success: true,
+        reply,
+        mode: 'roadmap'
+      }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+    
+    // Original prompt mode
     if (!prompt) {
       throw new Error('Prompt is required');
     }
 
     console.log('Generating text for prompt:', prompt);
 
-    // Create style instruction based on answer_style
-    let styleInstruction = '';
-    if (state?.answer_style) {
-      switch (state.answer_style) {
-        case 'eli5':
-          styleInstruction = 'Explain very simply, with analogies, like I\'m 5.';
-          break;
-        case 'intermediate':
-          styleInstruction = 'Explain practically, for a non-technical founder with some no-code experience.';
-          break;
-        case 'developer':
-          styleInstruction = 'Explain technically, with precise code details, as if to a developer.';
-          break;
-      }
-    }
+    // Get style instruction
+    const styleInstruction = getStyleInstruction(state?.answer_style || answer_style);
 
     // Build messages array with optional style instruction
     const messages = [
