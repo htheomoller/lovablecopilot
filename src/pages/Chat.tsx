@@ -1,8 +1,10 @@
-import React, { useState, useEffect } from 'react';
-import { supabase } from '@/integrations/supabase/client';
-import { useAuth } from '@/contexts/AuthContext';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { supabase } from '@/integrations/supabase/client'
+import { aiGenerate, type AnswerStyle } from '@/lib/ai'
+import { ONBOARDING_STEPS, shapeMilestones } from '@/lib/onboardingScript'
+import { useAuth } from '@/contexts/AuthContext'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 
 interface Message {
   id: string;
@@ -17,12 +19,15 @@ export default function Chat() {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [answerStyle, setAnswerStyle] = useState<string>(() => localStorage.getItem('cp_answer_style') || 'eli5');
+  const [style, setStyle] = useState<AnswerStyle | null>(null)
+  const [stepIndex, setStepIndex] = useState<number>(-1) // -1 until style chosen
+  const answersRef = useRef<Record<string, string>>({})
   
   const greetIfEmpty = () => {
     setMessages([{ 
       id: 'greeting',
       role: 'assistant', 
-      content: `Hi! I can tailor answers. Pick a style: \n- ELI5 (simple) \n- Intermediate \n- Developer`,
+      content: `Hi, I'm your Copilot. First, how technical should I be? Choose: ELI5, Intermediate, or Developer.`,
       timestamp: new Date()
     }]);
   };
@@ -117,8 +122,128 @@ export default function Chat() {
   }
 
   async function sendMessage() {
-    if (!input.trim() || !user || isLoading) return;
+    if (!input.trim()) return
 
+    // 1) If no style picked yet, interpret quick style words
+    if (!style) {
+      const normalized = input.trim().toLowerCase()
+      const picked: Record<string, AnswerStyle> = { 'eli5':'eli5', 'intermediate':'intermediate', 'developer':'developer' }
+      const guess = picked[normalized]
+      if (guess) {
+        setStyle(guess)
+        setMessages(prev => [...prev, { 
+          id: Date.now().toString(),
+          role: 'user', 
+          content: input,
+          timestamp: new Date()
+        }, { 
+          id: Date.now().toString() + '_assistant',
+          role: 'assistant', 
+          content: `Great — I'll answer like: ${guess}. Let's set up your project.`,
+          timestamp: new Date()
+        }])
+        setStepIndex(0) // start onboarding
+        setInput('')
+        return
+      }
+      setMessages(prev => [...prev, { 
+        id: Date.now().toString(),
+        role: 'user', 
+        content: input,
+        timestamp: new Date()
+      }, { 
+        id: Date.now().toString() + '_assistant',
+        role: 'assistant', 
+        content: 'Please choose one: ELI5, Intermediate, or Developer.',
+        timestamp: new Date()
+      }])
+      setInput('')
+      return
+    }
+
+    // 2) If onboarding in progress, capture answer and move next
+    if (stepIndex >= 0 && stepIndex < ONBOARDING_STEPS.length) {
+      const step = ONBOARDING_STEPS[stepIndex]
+      answersRef.current[step.key] = input.trim()
+      setMessages(prev => [...prev, { 
+        id: Date.now().toString(),
+        role: 'user', 
+        content: input,
+        timestamp: new Date()
+      }])
+      setInput('')
+      const nextIndex = stepIndex + 1
+      if (nextIndex < ONBOARDING_STEPS.length) {
+        const nextQ = ONBOARDING_STEPS[nextIndex].question
+        setMessages(prev => [...prev, { 
+          id: Date.now().toString() + '_assistant',
+          role: 'assistant', 
+          content: nextQ,
+          timestamp: new Date()
+        }])
+        setStepIndex(nextIndex)
+        return
+      }
+      // finished onboarding
+      setStepIndex(ONBOARDING_STEPS.length)
+      const answers = { ...answersRef.current }
+      setMessages(prev => [...prev, { 
+        id: Date.now().toString() + '_assistant',
+        role: 'assistant', 
+        content: 'Thanks! Creating your initial roadmap…',
+        timestamp: new Date()
+      }])
+
+      try {
+        // Make a short AI summary for the user (optional flavor)
+        const ai = await aiGenerate('Summarize this onboarding into a friendly 3‑bullet plan.', { style, context: answers })
+        setMessages(prev => [...prev, { 
+          id: Date.now().toString() + '_assistant',
+          role: 'assistant', 
+          content: ai.reply,
+          timestamp: new Date()
+        }])
+
+        // Seed milestones into DB
+        if (user?.id) {
+          const rows = shapeMilestones(answers, user.id)
+          const { error } = await supabase.from('ledger_milestones').insert(rows)
+          if (error) throw error
+          // Breadcrumb
+          await supabase.from('dev_breadcrumbs').insert({ 
+            owner_id: user.id,
+            scope: 'onboarding', 
+            summary: 'seed_milestones', 
+            details: rows 
+          })
+          setMessages(prev => [...prev, { 
+            id: Date.now().toString() + '_assistant',
+            role: 'assistant', 
+            content: 'Roadmap seeded. Check the Roadmap tab.',
+            timestamp: new Date()
+          }])
+        } else {
+          setMessages(prev => [...prev, { 
+            id: Date.now().toString() + '_assistant',
+            role: 'assistant', 
+            content: 'Log in to save milestones. (You can finish onboarding again later.)',
+            timestamp: new Date()
+          }])
+        }
+      } catch (e: any) {
+        setMessages(prev => [...prev, { 
+          id: Date.now().toString() + '_assistant',
+          role: 'assistant', 
+          content: `Setup encountered an error: ${e.message}`,
+          timestamp: new Date()
+        }])
+      }
+      return
+    }
+
+    // 3) Normal chat fallback (after onboarding)
+    if (!user || isLoading) return;
+    
     const userMessage = input.trim();
     const messageId = Date.now().toString();
     
@@ -135,58 +260,22 @@ export default function Chat() {
     setIsLoading(true);
 
     try {
-      // Call the AI generate edge function
-      const response = await fetch('https://yjfqfnmrsdfbvlyursdi.supabase.co/functions/v1/ai-generate', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ prompt: userMessage, state: { answer_style: answerStyle } })
-      });
-
-      const data = await response.json();
-      if (!data?.success) throw new Error(data?.error || 'AI call failed');
-      const assistantContent = data.reply || data.generatedText || data?.choices?.[0]?.message?.content || 'No reply';
-
-      // Add assistant message to chat
-      const assistantMsg: Message = {
+      const ai = await aiGenerate(input, { style, context: { answers: answersRef.current } })
+      setMessages(prev => [...prev, { 
         id: messageId + '_assistant',
-        role: 'assistant',
-        content: assistantContent,
+        role: 'assistant', 
+        content: ai.reply,
         timestamp: new Date()
-      };
-      
-      setMessages(prev => [...prev, assistantMsg]);
-
-      // Log breadcrumb with input/output
-      await supabase.from('dev_breadcrumbs').insert({
-        owner_id: user.id,
-        scope: 'chat',
-        summary: 'AI Chat interaction',
-        details: { 
-          input: userMessage, 
-          output: assistantContent 
-        },
-        tags: ['chat', 'ai']
-      });
-
-      // Check if we should seed milestones based on AI response
-      if (data.success && data.generatedText && detectProjectAndAudience(assistantContent)) {
-        await seedMilestones(assistantContent);
-      }
-
+      }])
+      setInput('')
     } catch (e: any) {
-      console.error('Error calling AI service:', e);
-      
-      // Add error message
-      const errorMsg: Message = {
-        id: messageId + '_error',
-        role: 'assistant',
-        content: `AI error: ${e?.message || e}`,
+      setMessages(prev => [...prev, { 
+        id: messageId + '_assistant',
+        role: 'assistant', 
+        content: 'Error calling AI service, please try again.',
         timestamp: new Date()
-      };
-      
-      setMessages(prev => [...prev, errorMsg]);
+      }])
+      setInput('')
     } finally {
       setIsLoading(false);
     }
@@ -250,30 +339,39 @@ export default function Chat() {
         )}
       </div>
 
-      {/* Answer Style Picker */}
-      <div className="mb-3 flex gap-2">
-        <Button 
-          variant={answerStyle === 'eli5' ? 'default' : 'outline'} 
-          onClick={() => pickStyle('eli5')}
-          size="sm"
-        >
-          ELI5
-        </Button>
-        <Button 
-          variant={answerStyle === 'intermediate' ? 'default' : 'outline'} 
-          onClick={() => pickStyle('intermediate')}
-          size="sm"
-        >
-          Intermediate
-        </Button>
-        <Button 
-          variant={answerStyle === 'developer' ? 'default' : 'outline'} 
-          onClick={() => pickStyle('developer')}
-          size="sm"
-        >
-          Developer
-        </Button>
-      </div>
+      {/* Style chips always visible until chosen */}
+      {!style && (
+        <div className="flex gap-2 mb-3">
+          {(['eli5','intermediate','developer'] as AnswerStyle[]).map(s => (
+            <Button 
+              key={s} 
+              variant="outline" 
+              size="sm"
+              onClick={() => {
+                setStyle(s); 
+                setMessages(prev => [...prev, { 
+                  id: Date.now().toString() + '_assistant',
+                  role:'assistant', 
+                  content:`Great — I'll answer like: ${s}. Let's set up your project.`,
+                  timestamp: new Date()
+                }]); 
+                setStepIndex(0);
+                // Ask first question immediately
+                setTimeout(() => {
+                  setMessages(prev => [...prev, { 
+                    id: Date.now().toString() + '_assistant',
+                    role:'assistant', 
+                    content: ONBOARDING_STEPS[0].question,
+                    timestamp: new Date()
+                  }])
+                }, 100);
+              }}
+            >
+              {s.toUpperCase()}
+            </Button>
+          ))}
+        </div>
+      )}
       
       {/* Input Area */}
       <div className="flex gap-2">
