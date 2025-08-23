@@ -48,7 +48,7 @@ export default function ChatOnboarding() {
         status: 'pending', 
         duration_days: 7, 
         owner_id: user.id,
-        start_date: new Date().toISOString().split('T')[0]
+        start_date: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
       },
       { 
         id: `onboard-roadmap-${timestamp}`,
@@ -57,7 +57,7 @@ export default function ChatOnboarding() {
         status: 'pending', 
         duration_days: 3, 
         owner_id: user.id,
-        start_date: new Date().toISOString().split('T')[0]
+        start_date: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
       }
     ];
     await supabase.from('ledger_milestones').insert(ms);
