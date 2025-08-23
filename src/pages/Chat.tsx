@@ -13,9 +13,86 @@ interface Message {
 
 export default function Chat() {
   const { user } = useAuth();
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<Message[]>([
+    {
+      id: 'onboarding',
+      role: 'assistant',
+      content: "Hi, I'm your Copilot. Tell me about your app idea and I'll help turn it into a roadmap.",
+      timestamp: new Date()
+    }
+  ]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+
+  // Helper function to detect if response contains project idea and audience
+  function detectProjectAndAudience(text: string): boolean {
+    const lowerText = text.toLowerCase();
+    
+    // Look for project/app indicators
+    const hasProjectIndicators = /\b(app|application|project|platform|service|tool|website|product)\b/.test(lowerText);
+    
+    // Look for audience indicators  
+    const hasAudienceIndicators = /\b(users?|customers?|people|audience|target|for|help|serve|designed for)\b/.test(lowerText);
+    
+    return hasProjectIndicators && hasAudienceIndicators;
+  }
+
+  // Function to seed initial milestones
+  async function seedMilestones(aiResponse: string) {
+    if (!user) return;
+
+    const milestoneId = Date.now().toString();
+    const milestones = [
+      {
+        id: `setup-${milestoneId}`,
+        project: 'CoPilot',
+        name: 'Setup & Auth',
+        status: 'planned',
+        duration_days: 4,
+        owner_id: user.id,
+        start_date: new Date().toISOString().split('T')[0]
+      },
+      {
+        id: `chat-${milestoneId}`,
+        project: 'CoPilot', 
+        name: 'Chat Onboarding',
+        status: 'planned',
+        duration_days: 6,
+        owner_id: user.id,
+        start_date: new Date(Date.now() + 4 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+      },
+      {
+        id: `roadmap-${milestoneId}`,
+        project: 'CoPilot',
+        name: 'Roadmap & Health', 
+        status: 'planned',
+        duration_days: 3,
+        owner_id: user.id,
+        start_date: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+      }
+    ];
+
+    try {
+      const { error } = await supabase.from('ledger_milestones').insert(milestones);
+      
+      if (!error) {
+        // Log breadcrumb for successful seeding
+        await supabase.from('dev_breadcrumbs').insert({
+          owner_id: user.id,
+          scope: 'onboarding',
+          summary: 'auto_milestones',
+          details: { 
+            ai_response: aiResponse,
+            milestones_created: milestones.length,
+            milestone_names: milestones.map(m => m.name)
+          },
+          tags: ['onboarding', 'milestones', 'auto-seed']
+        });
+      }
+    } catch (error) {
+      console.error('Error seeding milestones:', error);
+    }
+  }
 
   async function sendMessage() {
     if (!input.trim() || !user || isLoading) return;
@@ -75,6 +152,11 @@ export default function Chat() {
         },
         tags: ['chat', 'ai']
       });
+
+      // Check if we should seed milestones based on AI response
+      if (data.success && data.generatedText && detectProjectAndAudience(assistantContent)) {
+        await seedMilestones(assistantContent);
+      }
 
     } catch (error) {
       console.error('Error calling AI service:', error);
