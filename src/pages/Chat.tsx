@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
@@ -13,16 +13,38 @@ interface Message {
 
 export default function Chat() {
   const { user } = useAuth();
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: 'onboarding',
-      role: 'assistant',
-      content: "Hi, I'm your Copilot. Tell me about your app idea and I'll help turn it into a roadmap.",
-      timestamp: new Date()
-    }
-  ]);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [answerStyle, setAnswerStyle] = useState<string>(() => localStorage.getItem('cp_answer_style') || 'eli5');
+  
+  const greetIfEmpty = () => {
+    setMessages([{ 
+      id: 'greeting',
+      role: 'assistant', 
+      content: `Hi! I can tailor answers. Pick a style: \n- ELI5 (simple) \n- Intermediate \n- Developer`,
+      timestamp: new Date()
+    }]);
+  };
+  
+  useEffect(() => {
+    // greet on first load if empty
+    setTimeout(() => {
+      if (messages.length === 0) greetIfEmpty();
+    }, 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const pickStyle = (s: string) => { 
+    setAnswerStyle(s); 
+    localStorage.setItem('cp_answer_style', s); 
+    setMessages(m => [...m, { 
+      id: Date.now().toString(),
+      role: 'assistant', 
+      content: `Great — I'll answer like: ${s}. Tell me your app idea.`,
+      timestamp: new Date()
+    }]); 
+  };
 
   // Helper function to detect if response contains project idea and audience
   function detectProjectAndAudience(text: string): boolean {
@@ -119,17 +141,12 @@ export default function Chat() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ prompt: userMessage })
+        body: JSON.stringify({ prompt: userMessage, state: { answer_style: answerStyle } })
       });
 
       const data = await response.json();
-      
-      let assistantContent: string;
-      if (data.success && data.generatedText) {
-        assistantContent = data.generatedText;
-      } else {
-        assistantContent = "Error calling AI service, please try again.";
-      }
+      if (!data?.success) throw new Error(data?.error || 'AI call failed');
+      const assistantContent = data.reply || data.generatedText || data?.choices?.[0]?.message?.content || 'No reply';
 
       // Add assistant message to chat
       const assistantMsg: Message = {
@@ -158,14 +175,14 @@ export default function Chat() {
         await seedMilestones(assistantContent);
       }
 
-    } catch (error) {
-      console.error('Error calling AI service:', error);
+    } catch (e: any) {
+      console.error('Error calling AI service:', e);
       
       // Add error message
       const errorMsg: Message = {
         id: messageId + '_error',
         role: 'assistant',
-        content: "Error calling AI service, please try again.",
+        content: `AI error: ${e?.message || e}`,
         timestamp: new Date()
       };
       
@@ -233,6 +250,31 @@ export default function Chat() {
         )}
       </div>
 
+      {/* Answer Style Picker */}
+      <div className="mb-3 flex gap-2">
+        <Button 
+          variant={answerStyle === 'eli5' ? 'default' : 'outline'} 
+          onClick={() => pickStyle('eli5')}
+          size="sm"
+        >
+          ELI5
+        </Button>
+        <Button 
+          variant={answerStyle === 'intermediate' ? 'default' : 'outline'} 
+          onClick={() => pickStyle('intermediate')}
+          size="sm"
+        >
+          Intermediate
+        </Button>
+        <Button 
+          variant={answerStyle === 'developer' ? 'default' : 'outline'} 
+          onClick={() => pickStyle('developer')}
+          size="sm"
+        >
+          Developer
+        </Button>
+      </div>
+      
       {/* Input Area */}
       <div className="flex gap-2">
         <Input

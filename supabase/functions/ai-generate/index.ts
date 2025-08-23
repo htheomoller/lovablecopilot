@@ -64,7 +64,7 @@ serve(async (req) => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'gpt-4.1-2025-04-14',
+        model: 'gpt-4o-mini',
         messages: messages,
         max_completion_tokens: 1000,
       }),
@@ -77,14 +77,15 @@ serve(async (req) => {
     }
 
     const data = await response.json();
+    // Normalize message content across models
+    const reply = data?.choices?.[0]?.message?.content || data?.generatedText || '';
     console.log('OpenAI response received');
 
-    const generatedText = data.choices[0].message.content;
-
     return new Response(JSON.stringify({ 
-      reply: generatedText,
-      kv: {},
-      milestones: []
+      success: true,
+      reply,
+      generatedText: reply,  // backward‑compat for current UI
+      model: 'gpt-4o-mini'
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
@@ -94,7 +95,7 @@ serve(async (req) => {
     
     return new Response(JSON.stringify({ 
       success: false,
-      error: error.message 
+      error: (error as Error)?.message || 'Unknown error' 
     }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
