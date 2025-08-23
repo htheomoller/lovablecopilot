@@ -35,38 +35,27 @@ export default function Health() {
     if (!uid) return alert('Sign in first.');
     setSeeding(true);
     try {
-      const now = new Date().toISOString();
-      const { error: mErr } = await supabase.from('ledger_milestones').insert([
-        { 
-          id: `m1-${Date.now()}`, 
-          project: 'CoPilot', 
-          name: 'Setup & Auth', 
-          status: 'in_progress', 
-          duration_days: 3, 
-          owner_id: uid, 
-          start_date: new Date().toISOString().split('T')[0]
-        },
-        { 
-          id: `m2-${Date.now()}`, 
-          project: 'CoPilot', 
-          name: 'Chat Onboarding', 
-          status: 'pending', 
-          duration_days: 7, 
-          owner_id: uid, 
-          start_date: new Date().toISOString().split('T')[0]
+      // Call the edge function to seed milestones
+      const { data, error } = await supabase.functions.invoke('seed-milestones', {
+        headers: {
+          Authorization: `Bearer ${(await supabase.auth.getSession()).data.session?.access_token}`
         }
-      ]);
-      if (mErr) throw mErr;
+      });
+
+      if (error) throw error;
+
+      // Log the seeding action in breadcrumbs
       const { error: bErr } = await supabase.from('dev_breadcrumbs').insert({
         owner_id: uid,
         scope: 'seed',
-        summary: 'Seeded sample milestones',
-        details: { by: 'Health.seedSampleData' },
+        summary: 'Seeded sample milestones via edge function',
+        details: { by: 'Health.seedSampleData', response: data },
         tags: ['seed','health']
       });
-      if (bErr) throw bErr;
+      if (bErr) console.warn('Failed to log breadcrumb:', bErr);
+      
       await refreshCounts();
-      alert('Sample data created.');
+      alert('Sample data created successfully!');
     } catch (e: any) {
       console.error(e);
       alert('Seeding failed: ' + (e?.message || 'Unknown error'));
