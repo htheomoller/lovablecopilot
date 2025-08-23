@@ -31,7 +31,11 @@ serve(async (req) => {
       throw new Error('OPENAI_API_KEY is not configured');
     }
 
-    const { prompt, state, mode, answer_style, answers } = await req.json();
+    const body = await req.json();
+    const mode = body.mode || 'chat';
+    const prompt = body.prompt;
+    const answerStyle = body.answer_style || 'eli5';
+    const answers = body.answers || {};
     
     // Handle roadmap mode
     if (mode === 'roadmap') {
@@ -102,19 +106,23 @@ Generate a friendly roadmap explanation that outlines the development phases, ke
 
     // Build messages array with optional style instruction
     const messages = [
-      { 
-        role: 'system', 
-        content: 'You are a helpful assistant that generates high-quality content based on user prompts. Be creative and detailed in your responses.' 
+      {
+        role: 'system',
+        content: `You are Copilot's backend brain. You support three modes:
+- chat: produce a short, friendly reply that advances onboarding.
+- nlu: compress the last user answer into a single clean one-liner JSON {field, value, confidence}. Keep it factual, concise, safe for DB.
+- roadmap: synthesize milestones from 'answers' and 'answer_style', returning JSON {reply, milestones:[{name,duration_days,status,description}]}.
+Always return short, actionable content. Avoid long essays in chat mode.`
+      },
+      {
+        role: 'user',
+        content: mode === 'roadmap'
+          ? JSON.stringify({ mode, answer_style: answerStyle, answers })
+          : mode === 'nlu'
+            ? JSON.stringify({ mode, answer_style: answerStyle, text: prompt })
+            : prompt
       }
     ];
-
-    // Add style instruction if provided
-    if (styleInstruction) {
-      messages.push({ role: 'system', content: styleInstruction });
-    }
-
-    // Add user prompt
-    messages.push({ role: 'user', content: prompt });
 
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
@@ -136,16 +144,21 @@ Generate a friendly roadmap explanation that outlines the development phases, ke
     }
 
     const data = await response.json();
-    // Normalize message content across models
-    const reply = data?.choices?.[0]?.message?.content || data?.generatedText || '';
+    const raw = data.choices?.[0]?.message?.content || '';
+    let payload: any = { success: true, reply: raw, mode };
+    try {
+      if (mode === 'nlu' || mode === 'roadmap') {
+        const maybeJson = raw.trim().startsWith('{') ? raw : raw.slice(raw.indexOf('{'));
+        const parsed = JSON.parse(maybeJson);
+        payload = { success: true, mode, ...parsed, reply: parsed.reply || raw };
+      }
+    } catch (_) {
+      // fall back to text reply
+    }
+    const generatedText = payload.reply || raw;
     console.log('OpenAI response received');
 
-    return new Response(JSON.stringify({ 
-      success: true,
-      reply,
-      generatedText: reply,  // backward‑compat for current UI
-      model: 'gpt-4o-mini'
-    }), {
+    return new Response(JSON.stringify(payload), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
 
