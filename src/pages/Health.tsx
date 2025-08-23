@@ -7,6 +7,7 @@ import { supabase } from '@/integrations/supabase/client';
 import { runAllTests, type TestResult } from '@/lib/selfTests';
 import { logBreadcrumb, getBreadcrumbs } from '@/lib/devlog';
 import { useNavigate } from 'react-router-dom';
+import EnvBadge from '@/components/EnvBadge';
 
 const Health = () => {
   const { user, loading } = useAuth();
@@ -107,10 +108,11 @@ const Health = () => {
   
   return (
     <div className="p-8 space-y-6">
+      <EnvBadge />
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold">Health Dashboard</h1>
-          <p className="text-muted-foreground">DEV Environment Only</p>
+          <p className="text-muted-foreground">If you see ENV as DEV or PREVIEW above, /health should be allowed by AuthGate.</p>
         </div>
         <Badge variant="secondary">DEV MODE</Badge>
       </div>
