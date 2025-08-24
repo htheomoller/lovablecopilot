@@ -1,17 +1,23 @@
-export async function callEdge(prompt: string, mode: 'chat'|'nlu' = 'chat') {
-  const url = 'https://yjfqfnmrsdfbvlyursdi.supabase.co/functions/v1/ai-generate';
-  const res = await fetch(url, {
+export async function callEdge(prompt: string, mode: 'chat' | 'nlu' = 'chat') {
+  const url = import.meta.env.VITE_SUPABASE_URL?.replace(/\/$/, '') || '';
+  const anon = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+  if (!url || !anon) {
+    throw new Error('Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY');
+  }
+  const endpoint = `${url}/functions/v1/ai-generate`;
+  const res = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      // send anon key so Supabase gateway accepts the call when needed
-      'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY as string,
-      'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`
+      'apikey': anon,
+      'Authorization': `Bearer ${anon}`
     },
     body: JSON.stringify({ mode, prompt })
   });
-  const text = await res.text();
-  try { return JSON.parse(text); } catch {
-    return { success:false, error:'non_json', raw:text };
+  const ct = res.headers.get('Content-Type') || '';
+  if (!res.ok || !ct.includes('application/json')) {
+    const text = await res.text();
+    throw new Error(`Edge error ${res.status}: ${text.slice(0,200)}`);
   }
+  return res.json();
 }
