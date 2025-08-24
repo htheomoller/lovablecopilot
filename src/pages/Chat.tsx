@@ -39,8 +39,14 @@ export default function Chat() {
   const [messages, setMessages] = useState<ChatMsg[]>(() => load<ChatMsg[]>('cp_chat_messages_v1', []));
   const [answers, setAnswers]   = useState<Answers>(() => load<Answers>('cp_chat_answers_v1', {}));
   const [style, setStyle]       = useState<'eli5'|'intermediate'|'developer'>(() => load<'eli5'|'intermediate'|'developer'>('cp_chat_style_v1','eli5'));
+  const [answersStyleChosen, setAnswersStyleChosen] = useState<boolean>(() => load<boolean>('cp_style_chosen_v1', false));
   const [input, setInput]       = useState('');
   const [busy, setBusy]         = useState(false);
+
+  const setAnswerStyle = (newStyle: 'eli5'|'intermediate'|'developer') => {
+    setStyle(newStyle);
+    save('cp_chat_style_v1', newStyle);
+  };
 
   // Warm, lively greeting on first load
   useEffect(() => {
@@ -56,6 +62,7 @@ export default function Chat() {
   useEffect(() => { save('cp_chat_messages_v1', messages); }, [messages]);
   useEffect(() => { save('cp_chat_answers_v1', answers); }, [answers]);
   useEffect(() => { save('cp_chat_style_v1', style); }, [style]);
+  useEffect(() => { save('cp_style_chosen_v1', answersStyleChosen); }, [answersStyleChosen]);
 
   const push = (m: ChatMsg) => setMessages(prev => [...prev, m]);
 
@@ -64,33 +71,36 @@ export default function Chat() {
     if (!say) return;
     setInput('');
 
-    // show user msg immediately
+    // show user message immediately
     setMessages(m => [...m, { role: 'user', text: say, ts: Date.now() }]);
 
-    // --- Step 1: Style selection comes first ---
-    if (!answers.answerStyle) {
-      const norm = say.toLowerCase();
-      if (/(eli5|simple|five)/.test(norm)) {
-        setAnswers(prev => ({ ...prev, answerStyle: 'eli5' }));
-        setMessages(m => [...m, { role: 'assistant', text: 'Got it — I\'ll keep it super simple (ELI5). Now, what\'s your app idea in one short line?', ts: Date.now() }]);
+    // --- STEP 1: Style selection guard ---
+    if (!answersStyleChosen) {
+      const lower = say.toLowerCase();
+      if (lower.includes('eli5') || lower.includes('simple')) {
+        setAnswerStyle('eli5');
+        setMessages(m => [...m, { role: 'assistant', text: 'Got it — I will keep it super simple (ELI5). Now, what\'s your app idea in one short line?', ts: Date.now() }]);
+        setAnswersStyleChosen(true);
         return;
       }
-      if (/intermediate/.test(norm)) {
-        setAnswers(prev => ({ ...prev, answerStyle: 'intermediate' }));
-        setMessages(m => [...m, { role: 'assistant', text: 'Great — I\'ll explain at an intermediate level. What\'s your app idea in one short line?', ts: Date.now() }]);
+      if (lower.includes('intermediate')) {
+        setAnswerStyle('intermediate');
+        setMessages(m => [...m, { role: 'assistant', text: 'Great — I will explain things at an intermediate level. What\'s your app idea?', ts: Date.now() }]);
+        setAnswersStyleChosen(true);
         return;
       }
-      if (/developer|dev/.test(norm)) {
-        setAnswers(prev => ({ ...prev, answerStyle: 'developer' }));
-        setMessages(m => [...m, { role: 'assistant', text: 'Perfect — I\'ll use developer-level detail. So, what\'s your app idea in one short line?', ts: Date.now() }]);
+      if (lower.includes('developer') || lower.includes('technical')) {
+        setAnswerStyle('developer');
+        setMessages(m => [...m, { role: 'assistant', text: 'Okay — I will use developer-level detail. What\'s your app idea?', ts: Date.now() }]);
+        setAnswersStyleChosen(true);
         return;
       }
-      // Not clear → ask again
-      setMessages(m => [...m, { role: 'assistant', text: 'Please choose one: ELI5, Intermediate, or Developer.', ts: Date.now() }]);
+      // If style not picked yet → re-ask
+      setMessages(m => [...m, { role: 'assistant', text: 'Please choose one: ELI5 (simple), Intermediate, or Developer.', ts: Date.now() }]);
       return;
     }
 
-    // --- Step 2: Normal project fields (NLU) ---
+    // --- STEP 2: Normal NLU once style is chosen ---
     try {
       setBusy(true);
       const data = await callEdge({ mode: 'nlu', prompt: say });
