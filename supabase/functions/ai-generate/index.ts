@@ -12,15 +12,28 @@ function nluExtract(raw: string): { field: string|null; value: any; reply: strin
   const prompt = (raw || "").trim();
   const lower = prompt.toLowerCase();
 
+  // --- Only app fields (style is handled client-side) ---
   // Privacy
-  if (/(^|\b)(private|privacy)(\b|$)/.test(lower)) return { field: "privacy", value: "Private", reply: `Got it: **privacy** → "Private".` };
-  if (/share/.test(lower)) return { field: "privacy", value: "Share via link", reply: `Got it: **privacy** → "Share via link".` };
-  if (/(^|\b)public(\b|$)/.test(lower)) return { field: "privacy", value: "Public", reply: `Got it: **privacy** → "Public".` };
+  if (/(^|\b)(private|privacy)(\b|$)/.test(lower)) {
+    return { field: "privacy", value: "Private", reply: `Got it: **privacy** → "Private".` };
+  }
+  if (/share/.test(lower)) {
+    return { field: "privacy", value: "Share via link", reply: `Got it: **privacy** → "Share via link".` };
+  }
+  if (/(^|\b)public(\b|$)/.test(lower)) {
+    return { field: "privacy", value: "Public", reply: `Got it: **privacy** → "Public".` };
+  }
 
   // Auth
-  if (/google|oauth/.test(lower)) return { field: "auth", value: "Google OAuth", reply: `Got it: **auth** → "Google OAuth".` };
-  if (/magic|email\s*link/.test(lower)) return { field: "auth", value: "Magic email link", reply: `Got it: **auth** → "Magic email link".` };
-  if (/(^|\b)none(\b|$)|dev only/.test(lower)) return { field: "auth", value: "None (dev only)", reply: `Got it: **auth** → "None (dev only)".` };
+  if (/google|oauth/.test(lower)) {
+    return { field: "auth", value: "Google OAuth", reply: `Got it: **auth** → "Google OAuth".` };
+  }
+  if (/magic|email\s*link/.test(lower)) {
+    return { field: "auth", value: "Magic email link", reply: `Got it: **auth** → "Magic email link".` };
+  }
+  if (/(^|\b)none(\b|$)|dev only/.test(lower)) {
+    return { field: "auth", value: "None (dev only)", reply: `Got it: **auth** → "None (dev only)".` };
+  }
 
   // Deep work hours
   if (/\b0\.?5\b/.test(lower)) return { field: "deep_work_hours", value: "0.5", reply: `Got it: **deep_work_hours** → "0.5".` };
@@ -28,7 +41,7 @@ function nluExtract(raw: string): { field: string|null; value: any; reply: strin
   if (/\b2\b/.test(lower)) return { field: "deep_work_hours", value: "2", reply: `Got it: **deep_work_hours** → "2".` };
   if (/\b4\+?\b/.test(lower)) return { field: "deep_work_hours", value: "4+", reply: `Got it: **deep_work_hours** → "4+".` };
 
-  // Features (comma/semicolon/newline list, or mentions of "feature")
+  // Features
   if (/features?/.test(lower) || /[,;\n]/.test(prompt)) {
     const items = prompt.split(/[,;\n]/).map(s => s.trim()).filter(Boolean).slice(0, 6);
     if (items.length) return { field: "features", value: items, reply: `Got it: **features** → "${items.join(", ")}".` };
@@ -41,7 +54,7 @@ function nluExtract(raw: string): { field: string|null; value: any; reply: strin
     return { field: "name", value: clean, reply: `Got it: **name** → "${clean}".` };
   }
 
-  // Audience (keywords)
+  // Audience
   if (/audience|users?|customers?|for\s+/.test(lower)) {
     return { field: "audience", value: prompt, reply: `Got it: **audience** → "${prompt}".` };
   }

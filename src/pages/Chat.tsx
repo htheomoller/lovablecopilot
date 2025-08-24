@@ -3,7 +3,7 @@ import React, { useEffect, useState } from 'react';
 // Types
 type Role = 'user' | 'assistant';
 interface ChatMsg { role: Role; text: string; ts: number }
-interface Answers { idea?: string; name?: string; audience?: string; features?: string[]; privacy?: string; auth?: string; deep_work_hours?: string }
+interface Answers { idea?: string; name?: string; audience?: string; features?: string[]; privacy?: string; auth?: string; deep_work_hours?: string; answerStyle?: string }
 
 const ORDER: (keyof Answers)[] = ['idea','name','audience','features','privacy','auth','deep_work_hours'];
 
@@ -63,58 +63,52 @@ export default function Chat() {
     const say = input.trim();
     if (!say) return;
     setInput('');
-    push({ role: 'user', text: say, ts: Date.now() });
 
-    // Quick style selection
-    if (/^(eli5|intermediate|developer)$/i.test(say)) {
-      const picked = say.toLowerCase() as 'eli5'|'intermediate'|'developer';
-      setStyle(picked);
-      const q = nextQuestion(answers) || "When you're ready, say 'yes' and I'll draft a roadmap.";
-      push({ role: 'assistant', text: `Great — I'll explain like ${picked}. ${q}`, ts: Date.now() });
+    // show user msg immediately
+    setMessages(m => [...m, { role: 'user', text: say, ts: Date.now() }]);
+
+    // --- Step 1: Style selection comes first ---
+    if (!answers.answerStyle) {
+      const norm = say.toLowerCase();
+      if (/(eli5|simple|five)/.test(norm)) {
+        setAnswers(prev => ({ ...prev, answerStyle: 'eli5' }));
+        setMessages(m => [...m, { role: 'assistant', text: 'Got it — I\'ll keep it super simple (ELI5). Now, what\'s your app idea in one short line?', ts: Date.now() }]);
+        return;
+      }
+      if (/intermediate/.test(norm)) {
+        setAnswers(prev => ({ ...prev, answerStyle: 'intermediate' }));
+        setMessages(m => [...m, { role: 'assistant', text: 'Great — I\'ll explain at an intermediate level. What\'s your app idea in one short line?', ts: Date.now() }]);
+        return;
+      }
+      if (/developer|dev/.test(norm)) {
+        setAnswers(prev => ({ ...prev, answerStyle: 'developer' }));
+        setMessages(m => [...m, { role: 'assistant', text: 'Perfect — I\'ll use developer-level detail. So, what\'s your app idea in one short line?', ts: Date.now() }]);
+        return;
+      }
+      // Not clear → ask again
+      setMessages(m => [...m, { role: 'assistant', text: 'Please choose one: ELI5, Intermediate, or Developer.', ts: Date.now() }]);
       return;
     }
 
-    // If onboarding incomplete → NLU capture, reflect, then ask next
-    const need = nextQuestion(answers);
-    if (need) {
+    // --- Step 2: Normal project fields (NLU) ---
+    try {
       setBusy(true);
-      try {
-        const nlu = await callEdge({ mode: 'nlu', prompt: say });
-        if (nlu?.field) {
-          const next: Answers = { ...answers };
-          (next as any)[nlu.field] = nlu.value;
-          setAnswers(next);
-          push({ role: 'assistant', text: nlu.reply, ts: Date.now() });
-          const q2 = nextQuestion(next);
-          if (q2) push({ role: 'assistant', text: q2, ts: Date.now() });
-          else push({ role: 'assistant', text: "Awesome — I have everything I need. Would you like me to **draft and review a roadmap now**? (yes/no)", ts: Date.now() });
+      const data = await callEdge({ mode: 'nlu', prompt: say });
+      if (data?.reply) setMessages(m => [...m, { role: 'assistant', text: data.reply, ts: Date.now() }]);
+      if (data?.field) {
+        setAnswers(prev => ({ ...prev, [data.field]: data.value }));
+        const nq = nextQuestion({ ...answers, [data.field]: data.value });
+        if (nq) {
+          setMessages(m => [...m, { role: 'assistant', text: nq, ts: Date.now() }]);
         } else {
-          push({ role: 'assistant', text: nlu?.reply || 'Thanks — could you say that in one short line?', ts: Date.now() });
+          setMessages(m => [...m, { role: 'assistant', text: 'Great — I\'ve got everything I need. Would you like me to draft your roadmap now?', ts: Date.now() }]);
         }
-      } catch (e: any) {
-        push({ role: 'assistant', text: `Error calling onboarding service: ${e?.message || 'please try again'}`, ts: Date.now() });
-      } finally { setBusy(false); }
-      return;
+      }
+    } catch (err) {
+      setMessages(m => [...m, { role: 'assistant', text: `Error: ${err?.message || 'edge call failed'}`, ts: Date.now() }]);
+    } finally {
+      setBusy(false);
     }
-
-    // After all fields captured: handle yes/no for roadmap
-    if (/^(yes|yeah|yep|please|ok)$/i.test(say)) {
-      setBusy(true);
-      try {
-        const r = await callEdge({ mode: 'roadmap', answer_style: style, answers });
-        push({ role: 'assistant', text: r?.reply || 'Roadmap ready.', ts: Date.now() });
-      } catch (e: any) {
-        push({ role: 'assistant', text: `Error generating roadmap: ${e?.message || 'please try again'}`, ts: Date.now() });
-      } finally { setBusy(false); }
-      return;
-    }
-    if (/^(no|not yet|later)$/i.test(say)) {
-      push({ role: 'assistant', text: "No problem — we can refine your answers more or start whenever you like.", ts: Date.now() });
-      return;
-    }
-
-    // Light small-talk fallback (kept minimal for now)
-    push({ role: 'assistant', text: "Got it — if you want me to draft the roadmap now, just say 'yes'.", ts: Date.now() });
   }
 
   return (
