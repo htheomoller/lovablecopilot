@@ -32,6 +32,11 @@ serve(async (req) => {
     }
 
     const body = await req.json();
+    
+    // add a tiny ping mode for connectivity
+    if (body.mode === 'ping') {
+      return new Response(JSON.stringify({ ok:true, now: new Date().toISOString() }), { headers: { ...corsHeaders, 'Content-Type':'application/json' } });
+    }
     const mode = body.mode || 'chat';
     const prompt = body.prompt;
     const answerStyle = body.answer_style || 'eli5';

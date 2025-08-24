@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge'
 import { useToast } from '@/hooks/use-toast'
 import { supabase } from '@/integrations/supabase/client'
 import { logBreadcrumb } from '@/lib/devlog'
+import { aiChat, aiNLU, aiRoadmap } from '@/lib/ai'
 import {
   type ChatSession,
   type Message,
@@ -84,17 +85,7 @@ export default function Chat() {
       
       if (q) {
         // Use NLU to extract structured data
-        const nluRes = await fetch('/functions/v1/ai-generate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            mode: 'nlu', 
-            answer_style: style, 
-            prompt: say 
-          })
-        })
-        
-        const nluData = await nluRes.json()
+        const nluData = await aiNLU(say, style)
         
         if (nluData.field && nluData.value) {
           const updated = {
@@ -125,17 +116,7 @@ export default function Chat() {
           return
         }
 
-        const roadmapRes = await fetch('/functions/v1/ai-generate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            mode: 'roadmap', 
-            answer_style: style, 
-            answers: session.answers 
-          })
-        })
-        
-        const roadmapData = await roadmapRes.json()
+        const roadmapData = await aiRoadmap(session.answers, style)
         
         // Generate milestones (using existing generateMilestones logic)
         const milestones = generateMilestones(session.answers, user.id)
@@ -170,17 +151,7 @@ export default function Chat() {
       }
 
       // General chat mode
-      const chatRes = await fetch('/functions/v1/ai-generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          prompt: say, 
-          mode: 'chat', 
-          answer_style: style 
-        })
-      })
-      
-      const chatData = await chatRes.json()
+      const chatData = await aiChat(say, style)
       const bot = addMessage('assistant', chatData.reply || 'I\'m here to help!')
       setSession(bot)
       
