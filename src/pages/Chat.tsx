@@ -1,96 +1,105 @@
-import React, { useEffect, useState } from "react";
-import { pingEdge, callEdge } from "@/lib/ai";
+import { useEffect, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Card } from "@/components/ui/card";
 
-type Msg = { role: "user" | "assistant" | "system"; text: string; ts: number };
+interface Message {
+  role: "user" | "assistant";
+  text: string;
+  ts: number;
+}
 
 export default function Chat() {
-  const [messages, setMessages] = useState<Msg[]>([]);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  const [lastPing, setLastPing] = useState<string>("");
 
   useEffect(() => {
     setMessages([{
       role: "assistant",
-      text: "Hi — let's get started building your idea! I'm wired to an edge function. Use \"Ping Edge\" to verify it returns JSON. Then say ELI5, Intermediate, or Developer to begin.",
+      text: "Hi — let's get started building your idea! I'll ask you some questions so I can understand what you want to make. Once I have enough, I'll draft a roadmap. You can interrupt anytime with questions. First, how should I talk to you? Say: ELI5 (super simple), Intermediate, or Developer.",
       ts: Date.now()
     }]);
   }, []);
-
-  async function onPing() {
-    try {
-      setBusy(true);
-      const data = await pingEdge();
-      setLastPing(JSON.stringify(data));
-      setMessages(m => [...m, { role: "assistant", text: `Ping → ${JSON.stringify(data)}`, ts: Date.now() }]);
-    } catch (err: any) {
-      const msg = `Ping error: ${err?.message || String(err)}`;
-      setLastPing(msg);
-      setMessages(m => [...m, { role: "assistant", text: msg, ts: Date.now() }]);
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function send() {
     const say = input.trim();
     if (!say) return;
     setInput("");
-    setMessages(m => [...m, { role: "user", text: say, ts: Date.now() }]);
+    
+    const newMessages = [...messages, { role: "user" as const, text: say, ts: Date.now() }];
+    setMessages(newMessages);
 
     try {
       setBusy(true);
-      const data = await callEdge({ mode: "chat", prompt: say });
-      setMessages(m => [...m, { role: "assistant", text: (data as any)?.reply ?? JSON.stringify(data), ts: Date.now() }]);
+      const res = await fetch("/functions/v1/ai-generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "chat",
+          messages: newMessages.map(m => ({ 
+            role: m.role, 
+            content: m.text 
+          })),
+        }),
+      });
+      
+      const data = await res.json();
+      if (data?.reply) {
+        setMessages(prev => [...prev, { role: "assistant", text: data.reply, ts: Date.now() }]);
+      } else {
+        setMessages(prev => [...prev, { role: "assistant", text: `Error: ${data?.error || 'No reply from AI'}`, ts: Date.now() }]);
+      }
     } catch (err: any) {
-      setMessages(m => [...m, { role: "assistant", text: `Error talking to edge: ${err?.message || String(err)}`, ts: Date.now() }]);
+      setMessages(prev => [...prev, { role: "assistant", text: `Error talking to AI: ${err.message}`, ts: Date.now() }]);
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="p-4 space-y-3">
-      <div className="flex items-center gap-2">
-        <button
-          onClick={() => window.location.reload()}
-          className="px-3 py-1 rounded border"
-        >
+    <div className="max-w-4xl mx-auto p-6 space-y-4">
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold">Chat with Copilot</h1>
+        <Button variant="outline" onClick={() => window.location.reload()}>
           Refresh
-        </button>
-        <button
-          onClick={onPing}
-          className="px-3 py-1 rounded border"
-          disabled={busy}
-        >
-          Ping Edge
-        </button>
-        {busy && <span>…thinking</span>}
+        </Button>
       </div>
 
-      <div className="text-xs text-muted-foreground">
-        {lastPing ? `Last ping: ${lastPing}` : "No ping yet."}
-      </div>
-
-      <div className="space-y-2 border rounded p-3 min-h-[200px] bg-background">
-        {messages.map((m, i) => (
-          <div key={i} className={m.role === "user" ? "text-right" : ""}>
-            <span className="whitespace-pre-wrap">{m.text}</span>
-          </div>
-        ))}
-      </div>
+      <Card className="min-h-[400px] p-4">
+        <div className="space-y-4 mb-4">
+          {messages.map((m, i) => (
+            <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+              <div className={`max-w-[80%] p-3 rounded-lg ${
+                m.role === "user" 
+                  ? "bg-primary text-primary-foreground" 
+                  : "bg-muted text-muted-foreground"
+              }`}>
+                <div className="whitespace-pre-wrap">{m.text}</div>
+              </div>
+            </div>
+          ))}
+          {busy && (
+            <div className="flex justify-start">
+              <div className="bg-muted p-3 rounded-lg">
+                <div className="animate-pulse">AI is thinking...</div>
+              </div>
+            </div>
+          )}
+        </div>
+      </Card>
 
       <div className="flex gap-2">
-        <input
+        <Input
           value={input}
           onChange={e => setInput(e.target.value)}
-          onKeyDown={e => (e.key === "Enter" ? send() : null)}
+          onKeyDown={e => e.key === "Enter" && !busy ? send() : undefined}
           placeholder="Type your message…"
-          className="flex-1 px-3 py-2 border rounded"
+          disabled={busy}
         />
-        <button onClick={send} className="px-3 py-2 border rounded" disabled={busy}>
+        <Button onClick={send} disabled={busy || !input.trim()}>
           Send
-        </button>
+        </Button>
       </div>
     </div>
   );
