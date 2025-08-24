@@ -17,28 +17,93 @@ serve(async (req: Request) => {
     const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
     if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set");
 
-    const system = mode === "nlu"
-      ? `You are a helpful onboarding assistant. Classify the user message into one of these fields: idea, name, audience, features (array, comma separated), privacy, auth, deep_work_hours. Always return a JSON object with { field, value, reply }. reply should be a short, friendly reflection back to the user.`
-      : `You are a friendly copilot. Reply naturally and concisely.`;
+    let system = "";
+    let responseSchema = {};
 
-    const body = {
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: prompt }
-      ],
-      response_format: { type: "json_schema", json_schema: {
+    if (mode === "nlu") {
+      system = `You are a helpful onboarding assistant. Classify the user message into one of these fields: style, idea, name, audience, features, privacy, auth, deep_work_hours.
+      
+For each field:
+- style: conversation style preference (eli5, intermediate, developer)  
+- idea: core app concept
+- name: app name (if user says "invent one", generate 3 short creative names, pick the best one)
+- audience: target users
+- features: key features (array, comma separated)
+- privacy: data visibility preference
+- auth: authentication method
+- deep_work_hours: focused work hours per day
+
+Return JSON with { field, value, shortValue, reply } where:
+- value: full captured value
+- shortValue: concise 1-liner version
+- reply: natural, conversational reflection (not robotic)
+
+If user says "invent one" for name, generate 3 options, pick one, and reply: "Let's go with [NAME] for now. Easy to change later."`;
+
+      responseSchema = {
         name: "classification",
         schema: {
           type: "object",
           properties: {
             field: { type: "string" },
             value: {},
+            shortValue: { type: "string" },
             reply: { type: "string" }
           },
-          required: ["field","value","reply"]
+          required: ["field", "value", "shortValue", "reply"]
         }
-      }}
+      };
+    } else if (mode === "summary") {
+      system = `You are a helpful assistant. Take the collected answers and create a concise, friendly summary of the user's project. Make it conversational and clear.`;
+      
+      responseSchema = {
+        name: "summary",
+        schema: {
+          type: "object",
+          properties: {
+            summary: { type: "string" },
+            reply: { type: "string" }
+          },
+          required: ["summary", "reply"]
+        }
+      };
+    } else if (mode === "roadmap") {
+      system = `You are a helpful project assistant. Create a conversational roadmap with 3-4 practical steps for building the user's app. Keep it friendly and actionable.`;
+      
+      responseSchema = {
+        name: "roadmap",
+        schema: {
+          type: "object",
+          properties: {
+            roadmap: { type: "string" },
+            reply: { type: "string" }
+          },
+          required: ["roadmap", "reply"]
+        }
+      };
+    } else {
+      system = `You are a friendly copilot. Reply naturally and concisely.`;
+      responseSchema = {
+        name: "general",
+        schema: {
+          type: "object",
+          properties: {
+            reply: { type: "string" }
+          },
+          required: ["reply"]
+        }
+      };
+    }
+
+    const messages = [
+      { role: "system", content: system },
+      { role: "user", content: mode === "summary" || mode === "roadmap" ? JSON.stringify(answers) : prompt }
+    ];
+
+    const body = {
+      model: "gpt-4o-mini",
+      messages,
+      response_format: { type: "json_schema", json_schema: responseSchema }
     };
 
     const r = await fetch("https://api.openai.com/v1/chat/completions", {

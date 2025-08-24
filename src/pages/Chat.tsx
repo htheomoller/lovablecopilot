@@ -3,6 +3,7 @@ import { callEdge } from '@/lib/ai';
 
 interface Msg { role: 'user'|'assistant'; text: string; ts: number }
 interface Answers { 
+  style?: 'eli5'|'intermediate'|'developer';
   idea?: string; 
   name?: string; 
   audience?: string; 
@@ -10,12 +11,18 @@ interface Answers {
   privacy?: string; 
   auth?: string; 
   deep_work_hours?: string; 
-  answer_style?: 'eli5'|'intermediate'|'developer' 
 }
 
-const ORDER: (keyof Answers)[] = ['idea','name','audience','features','privacy','auth','deep_work_hours'];
+interface Session {
+  messages: Msg[];
+  answers: Record<string, string>;
+  phase: 'onboarding' | 'summary_review' | 'roadmap_review' | 'complete';
+}
+
+const ORDER: (keyof Answers)[] = ['style','idea','name','audience','features','privacy','auth','deep_work_hours'];
 
 function nextQuestion(a: Answers): string {
+  if (!a.style) return 'First, how should I talk to you? Say: ELI5 (super simple), Intermediate, or Developer.';
   if (!a.idea) return 'What\'s your app idea in one short line?';
   if (!a.name) return 'Do you have a name? If not, say "invent one" or type a short name (e.g. PhotoFix).';
   if (!a.audience) return 'Who is it for (your ideal customer/user)?';  
@@ -26,18 +33,11 @@ function nextQuestion(a: Answers): string {
   return '';
 }
 
-function detectAnswerStyle(input: string): 'eli5'|'intermediate'|'developer'|null {
-  const lower = input.toLowerCase();
-  if (/(^|\b)(eli5|very simple|simple|scared of code|not technical|beginner)(\b|$)/.test(lower)) return 'eli5';
-  if (/(^|\b)(intermediate|some experience|medium)(\b|$)/.test(lower)) return 'intermediate';
-  if (/(^|\b)(developer|dev|technical|advanced|code)(\b|$)/.test(lower)) return 'developer';
-  return null;
-}
-
 export default function Chat() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState('');
   const [answers, setAnswers] = useState<Answers>({});
+  const [session, setSession] = useState<Session>({ messages: [], answers: {}, phase: 'onboarding' });
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -60,7 +60,7 @@ export default function Chat() {
     
     // If no saved messages, start with greeting
     if (!hasMessages) {
-      const greeting = "Hi — let's get started building your idea! I'll ask you a few quick questions so I can understand what you want to make. Once I have enough, I'll build a roadmap for you. Anytime you're unsure, just ask me.\n\nTo start, how should I talk to you? Say: ELI5 (very simple), Intermediate, or Developer.";
+      const greeting = "Hi — let's get started building your idea! I'll ask you some questions so I can understand what you want to make. Once I have enough, I'll draft a roadmap for you. You can interrupt anytime with questions.\n\nFirst, how should I talk to you? Say: ELI5 (super simple), Intermediate, or Developer.";
       const initialMessages: Msg[] = [{ role: 'assistant' as const, text: greeting, ts: Date.now() }];
       setMessages(initialMessages);
       try { localStorage.setItem('cp_messages_v1', JSON.stringify(initialMessages)); } catch {}
@@ -87,52 +87,87 @@ export default function Chat() {
 
     setBusy(true);
     try {
-      // Check if we're still in answer style selection phase
-      if (!answers.answer_style) {
-        const style = detectAnswerStyle(say);
-        if (style) {
-          const next = { ...answers, answer_style: style };
-          persistAnswers(next);
-          const styleText = style === 'eli5' ? 'very simple' : style;
-          const reply = `Got it — I'll keep it ${styleText}. ${nextQuestion(next)}`;
-          persistMessages([...newMessages, { role: 'assistant' as const, text: reply, ts: Date.now() }]);
-          setBusy(false);
-          return;
-        }
-      }
-
-      // Handle roadmap trigger  
-      if (nextQuestion(answers) === '' && /(^|\b)(yes|yeah|sure|ok|okay|review|roadmap)(\b|$)/i.test(say)) {
-        const reply = 'Great! Let me build your roadmap now...';
-        persistMessages([...newMessages, { role: 'assistant' as const, text: reply, ts: Date.now() }]);
-        setBusy(false);
-        return;
-      }
-
-      // Send to OpenAI NLU
-      const data = await callEdge(say, 'nlu');
-      let reply = data?.reply ?? 'No reply.';
-      
-      if (data?.field) {
-        const next: Answers = { ...answers };
-        if (data.field === 'features' && Array.isArray(data.value)) {
-          next.features = data.value;
-        } else {
-          (next as any)[data.field] = data.value;
-        }
-        persistAnswers(next);
+      if (session.phase === 'onboarding') {
+        // Send to OpenAI NLU during onboarding
+        const data = await callEdge(say, 'nlu');
+        let reply = data?.reply ?? 'No reply.';
         
-        const q = nextQuestion(next);
-        if (q) {
-          reply += `\n\n${q}`;
-        } else {
-          reply += `\n\nGreat — I have everything I need. Would you like to review your roadmap now?`;
+        if (data?.field && data?.shortValue) {
+          const next: Answers = { ...answers };
+          const nextSession = { ...session };
+          
+          if (data.field === 'features' && Array.isArray(data.value)) {
+            next.features = data.value;
+            nextSession.answers[data.field] = data.shortValue;
+          } else {
+            (next as any)[data.field] = data.value;
+            nextSession.answers[data.field] = data.shortValue;
+          }
+          
+          persistAnswers(next);
+          setSession(nextSession);
+          
+          const q = nextQuestion(next);
+          if (q) {
+            reply += `\n\n${q}`;
+          } else {
+            // All fields collected, move to summary phase
+            nextSession.phase = 'summary_review';
+            setSession(nextSession);
+            
+            // Generate summary
+            setTimeout(async () => {
+              try {
+                const summaryData = await callEdge('', 'summary', nextSession.answers);
+                const summaryReply = `Here's what I've got so far:\n\n${summaryData.summary}\n\nDo you want to make any changes, or should we move on to creating your roadmap?`;
+                persistMessages([...newMessages, { role: 'assistant' as const, text: reply, ts: Date.now() }, { role: 'assistant' as const, text: summaryReply, ts: Date.now() }]);
+                setBusy(false);
+              } catch (err: any) {
+                persistMessages([...newMessages, { role: 'assistant' as const, text: reply, ts: Date.now() }, { role: 'assistant' as const, text: `Error generating summary: ${err.message}`, ts: Date.now() }]);
+                setBusy(false);
+              }
+            }, 100);
+            return;
+          }
         }
+        
+        persistMessages([...newMessages, { role: 'assistant' as const, text: reply, ts: Date.now() }]);
+      } else if (session.phase === 'summary_review') {
+        // Handle summary approval
+        if (/(^|\b)(yes|yeah|sure|ok|okay|move on|roadmap|continue)(\b|$)/i.test(say)) {
+          const nextSession = { ...session, phase: 'roadmap_review' as const };
+          setSession(nextSession);
+          
+          // Generate roadmap
+          const roadmapData = await callEdge('', 'roadmap', session.answers);
+          const roadmapReply = `Here's a draft roadmap for your project:\n\n${roadmapData.roadmap}\n\nWant me to adjust anything, or should we lock it in?`;
+          persistMessages([...newMessages, { role: 'assistant' as const, text: roadmapReply, ts: Date.now() }]);
+        } else {
+          // Handle changes request
+          const reply = 'What would you like to change? I can update any part of your project details.';
+          persistMessages([...newMessages, { role: 'assistant' as const, text: reply, ts: Date.now() }]);
+        }
+      } else if (session.phase === 'roadmap_review') {
+        // Handle roadmap approval
+        if (/(^|\b)(yes|yeah|sure|ok|okay|lock it in|approve|good)(\b|$)/i.test(say)) {
+          const nextSession = { ...session, phase: 'complete' as const };
+          setSession(nextSession);
+          
+          const reply = 'Perfect! Your roadmap is locked in. I\'ve created your project milestones and you\'re all set to start building!';
+          persistMessages([...newMessages, { role: 'assistant' as const, text: reply, ts: Date.now() }]);
+        } else {
+          // Handle roadmap changes
+          const reply = 'What adjustments would you like me to make to the roadmap?';
+          persistMessages([...newMessages, { role: 'assistant' as const, text: reply, ts: Date.now() }]);
+        }
+      } else {
+        // General chat after completion
+        const data = await callEdge(say, 'chat');
+        const reply = data?.reply ?? 'How can I help you further?';
+        persistMessages([...newMessages, { role: 'assistant' as const, text: reply, ts: Date.now() }]);
       }
-      
-      persistMessages([...newMessages, { role: 'assistant' as const, text: reply, ts: Date.now() }]);
     } catch (err: any) {
-      persistMessages([...newMessages, { role: 'assistant' as const, text: `Error talking to edge: ${err.message || err}`, ts: Date.now() }]);
+      persistMessages([...newMessages, { role: 'assistant' as const, text: `Error: ${err.message || err}`, ts: Date.now() }]);
     } finally {
       setBusy(false);
     }
@@ -156,6 +191,8 @@ export default function Chat() {
         <button className="px-2 py-1 text-sm rounded bg-secondary" onClick={() => {
           localStorage.removeItem('cp_messages_v1');
           localStorage.removeItem('cp_ans_v1');
+          setSession({ messages: [], answers: {}, phase: 'onboarding' });
+          setAnswers({});
           window.location.reload();
         }}>Reset</button>
         <button className="px-2 py-1 text-sm rounded bg-secondary" onClick={ping}>Ping Edge</button>

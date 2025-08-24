@@ -1,7 +1,7 @@
-export type EdgeChatMode = 'chat' | 'nlu' | 'roadmap';
+export type EdgeChatMode = 'chat' | 'nlu' | 'summary' | 'roadmap';
 
 // Robust caller: try relative proxy first, then direct Supabase URL from env
-export async function callEdge(prompt: string, mode: EdgeChatMode = 'chat') {
+export async function callEdge(prompt: string, mode: EdgeChatMode = 'chat', answers?: any) {
   const rel = '/functions/v1/ai-generate';
   const directBase = import.meta.env.VITE_SUPABASE_URL as string | undefined;
   const anon = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
@@ -18,7 +18,7 @@ export async function callEdge(prompt: string, mode: EdgeChatMode = 'chat') {
     }
   };
 
-  const body = JSON.stringify({ mode, prompt });
+  const body = JSON.stringify({ mode, prompt, answers });
   const init: RequestInit = {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...(anon ? { 'apikey': anon, 'Authorization': `Bearer ${anon}` } : {}) },
