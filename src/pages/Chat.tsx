@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { callEdge } from '@/lib/ai';
+import { callEdge } from '@/lib/edge';
 
 // Minimal conversational flow using local state + deterministic NLU
 
@@ -57,7 +57,7 @@ export default function Chat() {
       setBusy(true);
       const data = await callEdge(say, 'nlu');
       if (data?.reply) {
-        setMessages(m => [...m, { role: 'assistant', text: data.reply, ts: Date.now() }]);
+        setMessages(m => [...m, { role: 'assistant', text: data.reply ?? (data?.raw || 'No reply.'), ts: Date.now() }]);
       }
       if (data?.field) {
         setAnswers(prev => {
