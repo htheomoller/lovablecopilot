@@ -4,7 +4,7 @@ import { Answers, mergeExtract, nextMissing, reflectPromptFor } from "@/lib/onbo
 
 type Msg = { role: "assistant" | "user" | "system", text: string, ts: number };
 
-const GREETING = `Hi — let's get started building your idea! I'm wired to an edge function. You can test it with the Ping Edge button. How should I talk to you? Say: ELI5 (very simple), Intermediate, or Developer.`;
+const GREETING = `Hi — let's get started building your idea! I'm wired to an edge function. You can test it with the Ping Edge button. How should I talk to you? Say: Explain like I'm 5 (very simple), Intermediate, or Developer.`;
 
 const KEY = "cp_chat_session_v2";
 
@@ -61,20 +61,28 @@ export default function Chat() {
     setInput("");
     push({ role: "user", text: say, ts: Date.now() });
 
-    // quick style set
-    if (/^eli5$/i.test(say)) {
-      setS((prev) => ({ ...prev, style: "eli5" }));
-      push({ role: "assistant", text: "Got it — I'll keep it very simple. What's your app idea in one short line?", ts: Date.now() });
-      return;
-    }
-    if (/^intermediate$/i.test(say)) {
-      setS((prev) => ({ ...prev, style: "intermediate" }));
-      push({ role: "assistant", text: "Great — intermediate it is. What's your app idea in one short line?", ts: Date.now() });
-      return;
-    }
-    if (/^developer$/i.test(say)) {
-      setS((prev) => ({ ...prev, style: "developer" }));
-      push({ role: "assistant", text: "Okay — I'll be specific and concise. What's your app idea in one short line?", ts: Date.now() });
+    // Enhanced style detection with natural language patterns
+    const STYLE_PATTERNS = {
+      eli5: /(\beli5\b|explain\s+like\s+i'?m\s*5|explain\s+like\s+i\s*am\s*5|very\s+simple\b|\bsimple\b)/i,
+      intermediate: /(\bintermediate\b|somewhat\s+technical|not\s+too\s+technical|medium\b)/i,
+      developer: /(\bdeveloper\b|\bdev\b|very\s+technical|advanced\b)/i,
+    };
+    
+    const styleDisplay = (s: 'eli5'|'intermediate'|'developer') => (
+      s === 'eli5' ? "Explain like I'm 5 (very simple)" : s === 'intermediate' ? 'Intermediate' : 'Developer'
+    );
+    
+    const pickStyleFrom = (text: string): ('eli5'|'intermediate'|'developer'|null) => {
+      if (STYLE_PATTERNS.eli5.test(text)) return 'eli5';
+      if (STYLE_PATTERNS.intermediate.test(text)) return 'intermediate';
+      if (STYLE_PATTERNS.developer.test(text)) return 'developer';
+      return null;
+    };
+
+    const pickedStyle = pickStyleFrom(say);
+    if (pickedStyle) {
+      setS((prev) => ({ ...prev, style: pickedStyle }));
+      push({ role: "assistant", text: `Great — I'll use ${styleDisplay(pickedStyle)}. What's your app idea in one short line?`, ts: Date.now() });
       return;
     }
 
