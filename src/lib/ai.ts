@@ -1,34 +1,25 @@
-// Simple client for our edge function (always returns JSON or throws informative error)
-export type Answers = Partial<{
-  answer_style: 'eli5' | 'intermediate' | 'developer'
-  idea: string
-  name: string
-  audience: string
-  features: string[]
-  privacy: 'Private' | 'Share via link' | 'Public'
-  auth: 'Google OAuth' | 'Magic email link' | 'None (dev only)'
-  deep_work_hours: '0.5' | '1' | '2' | '4+'
-}>;
+export type EdgeReply =
+  | { success: true; mode: string; reply: string }
+  | { success: false; error: string };
 
-async function postEdge(payload: any) {
-  const res = await fetch('/functions/v1/ai-generate', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
+const EDGE_PATH = "/functions/v1/ai-generate";
+
+export async function callEdge(payload: any): Promise<EdgeReply> {
+  const res = await fetch(EDGE_PATH, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload ?? {}),
   });
   const text = await res.text();
   try {
-    const j = JSON.parse(text);
-    return j;
+    return JSON.parse(text);
   } catch {
-    throw new Error(`Non-JSON from edge (status ${res.status}):\n${text.slice(0, 400)}`);
+    throw new Error(`Non-JSON from edge (status ${res.status}): ${text.slice(0,120)}`);
   }
 }
 
-export async function nlu(prompt: string, answers: Answers, style: Answers['answer_style'] = 'intermediate') {
-  return postEdge({ mode: 'nlu', prompt, style, answers });
-}
-
-export async function makeRoadmap(answers: Answers, style: Answers['answer_style'] = 'intermediate') {
-  return postEdge({ mode: 'roadmap', answers, style });
+export async function pingEdge(): Promise<string> {
+  const out = await callEdge({ mode: "ping" });
+  if ((out as any).success) return (out as any).reply || "ok";
+  throw new Error((out as any).error || "unknown edge error");
 }
