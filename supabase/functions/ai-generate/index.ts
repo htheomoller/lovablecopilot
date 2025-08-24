@@ -1,88 +1,47 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-const corsHeaders = {
+const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST,OPTIONS"
 };
 
-// OpenAI call
-async function callOpenAI(prompt: string, system: string, model = "gpt-4o-mini") {
-  const apiKey = Deno.env.get("OPENAI_API_KEY");
-  if (!apiKey) throw new Error("Missing OPENAI_API_KEY");
-
-  const body = {
-    model,
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: prompt }
-    ],
-    temperature: 0.7
-  };
-
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`
-    },
-    body: JSON.stringify(body)
+function json(body: unknown, init: ResponseInit = {}) {
+  return new Response(JSON.stringify(body), {
+    ...init,
+    headers: { ...corsHeaders, "Content-Type": "application/json", ...(init.headers || {}) }
   });
-
-  if (!res.ok) throw new Error(`OpenAI error: ${await res.text()}`);
-  const j = await res.json();
-  return j.choices[0].message.content.trim();
 }
 
 serve(async (req: Request) => {
-  if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: corsHeaders });
+  // CORS preflight FIRST
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
+  // Always try to read text first, so we can return JSON even if the client sent no/invalid JSON
+  let raw = "";
+  try { raw = await req.text(); } catch { /* ignore */ }
+
+  // Safely parse JSON body, tolerate empty / invalid
+  let body: any = {};
+  if (raw && raw.trim().length) {
+    try { body = JSON.parse(raw); } catch (e) { return json({ success: false, error: "Invalid JSON body", detail: String(e) }, { status: 400 }); }
   }
 
-  try {
-    const { mode = "chat", prompt = "", answers = {} } = await req.json();
-    if (!prompt) throw new Error("Missing prompt");
+  // Modes
+  const mode = String(body?.mode || "chat");
+  const prompt = String(body?.prompt || "");
 
-    let systemPrompt = "";
-    if (mode === "nlu") {
-      systemPrompt = `You are a project onboarding assistant.
-Extract structured fields from the user's reply.
-Fields: idea, name, audience, features, privacy, auth, deep_work_hours.
-Return clean JSON: {field, value, reply}.
-Reply is a short, natural reflection back to the user.`;
-    } else if (mode === "roadmap") {
-      systemPrompt = `You are a roadmap generator. Based on collected answers, draft a short roadmap.
-Keep it concise, actionable, and user-friendly.`;
-    } else {
-      systemPrompt = `You are a friendly chat companion guiding users through building their project idea.
-Keep answers conversational, short, and supportive.
-When enough info is collected, suggest confirming answers before generating a roadmap.`;
-    }
-
-    const reply = await callOpenAI(prompt, systemPrompt);
-
-    // If NLU, parse JSON
-    if (mode === "nlu") {
-      try {
-        const parsed = JSON.parse(reply);
-        return new Response(JSON.stringify({ success: true, mode, ...parsed }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" }
-        });
-      } catch {
-        return new Response(JSON.stringify({ success: true, mode, reply }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" }
-        });
-      }
-    }
-
-    return new Response(JSON.stringify({ success: true, mode, reply }), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" }
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return new Response(JSON.stringify({ success: false, error: msg }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" }
-    });
+  // Simple health check that NEVER needs a body
+  if (mode === "ping") {
+    return json({ success: true, mode: "ping", reply: "pong" });
   }
+
+  // Baseline echo to prove round‑trip works even without OpenAI
+  if (!prompt) {
+    return json({ success: true, mode, reply: "Baseline: no prompt provided (but function is reachable)." });
+  }
+
+  // If you already set OPENAI_API_KEY in Supabase, you can uncomment the OpenAI section later.  
+  // For now, just echo so the chat can progress and we can isolate wiring issues.
+  return json({ success: true, mode, reply: `Echo: "${prompt}"` });
 });
