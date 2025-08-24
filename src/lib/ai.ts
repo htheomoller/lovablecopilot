@@ -1,4 +1,4 @@
-export type EdgeChatMode = 'chat' | 'nlu';
+export type EdgeChatMode = 'chat' | 'nlu' | 'roadmap';
 
 // Robust caller: try relative proxy first, then direct Supabase URL from env
 export async function callEdge(prompt: string, mode: EdgeChatMode = 'chat') {

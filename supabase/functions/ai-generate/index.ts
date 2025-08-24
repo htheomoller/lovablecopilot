@@ -11,6 +11,12 @@ const corsHeaders = {
 function nluExtract(raw: string) {
   const prompt = (raw || "").trim();
   const lower = prompt.toLowerCase();
+  
+  // Skip answer style preferences - these should be handled before NLU
+  if (/(^|\b)(eli5|very simple|simple|scared of code|not technical|beginner|intermediate|some experience|medium|developer|dev|technical|advanced)(\b|$)/.test(lower)) {
+    return { field: null, value: null, reply: "Please select your communication style first." };
+  }
+  
   if (/(^|\b)(private|privacy)(\b|$)/.test(lower)) return { field: "privacy", value: "Private", reply: "Got it: **privacy** → \"Private\"." };
   if (/share/.test(lower)) return { field: "privacy", value: "Share via link", reply: "Got it: **privacy** → \"Share via link\"." };
   if (/(^|\b)public(\b|$)/.test(lower)) return { field: "privacy", value: "Public", reply: "Got it: **privacy** → \"Public\"." };
@@ -46,6 +52,12 @@ serve(async (req: Request) => {
     if (mode === "nlu") {
       const res = nluExtract(prompt);
       return new Response(JSON.stringify({ success: true, mode: "nlu", field: res.field, value: res.value, reply: res.reply }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
+
+    if (mode === "roadmap") {
+      return new Response(JSON.stringify({ success: true, mode: "roadmap", reply: "🚀 Generating your custom roadmap with milestones and priorities. This will help you build systematically..." }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" }
       });
     }
