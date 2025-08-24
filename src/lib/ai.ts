@@ -1,33 +1,23 @@
-export type EdgeResponse =
-  | { success: true; mode: string; reply?: string; ok?: boolean; ts?: number }
-  | { success: false; error: string };
+export type EdgeMode = "ping" | "chat" | "nlu" | "roadmap";
 
-async function fetchJSON(res: Response): Promise<any> {
-  const text = await res.text();
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error(`Non-JSON from edge (status ${res.status}): ${text.slice(0,200)}`);
-  }
-}
-
-// Primary: Lovable/Supabase proxy path. This MUST work if the function exists.
-const RELATIVE_INVOKE = "/functions/v1/ai-generate";
-
-/**
- * callEdge — small safe wrapper that ALWAYS throws useful errors for non-JSON/404.
- */
-export async function callEdge(payload: Record<string, any>): Promise<EdgeResponse> {
-  const res = await fetch(RELATIVE_INVOKE, {
+async function postEdge(mode: EdgeMode, payload: Record<string, unknown> = {}) {
+  const res = await fetch("/functions/v1/ai-generate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload ?? {})
+    body: JSON.stringify({ mode, ...payload }),
   });
-  const data = await fetchJSON(res);
-  if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
-  return data;
+  const raw = await res.text();
+  let json: any = null;
+  try { json = JSON.parse(raw); } catch { /* fallthrough */ }
+  if (!res.ok || !json) {
+    const note = `Non-JSON from edge (status ${res.status}):`;
+    throw new Error(`${note}\n${raw}`);
+  }
+  return { ok: true, status: res.status, json, raw };
 }
 
-export async function pingEdge(): Promise<EdgeResponse> {
-  return callEdge({ mode: "health" });
-}
+export const edgePing = () => postEdge("ping");
+export const edgeChat = (prompt: string, answer_style: string) => postEdge("chat", { prompt, answer_style });
+export const edgeNLU  = (prompt: string, answer_style: string) => postEdge("nlu",  { prompt, answer_style });
+export const edgeRoadmap = (answers: Record<string, unknown>, answer_style: string) =>
+  postEdge("roadmap", { answers, answer_style });
