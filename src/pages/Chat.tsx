@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
+import { callEdge } from "@/lib/edgeClient";
 
 interface Message {
   role: "user" | "assistant";
@@ -13,6 +14,7 @@ export default function Chat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [diagnostics, setDiagnostics] = useState("");
 
   useEffect(() => {
     setMessages([{
@@ -21,6 +23,18 @@ export default function Chat() {
       ts: Date.now()
     }]);
   }, []);
+
+  async function testPing() {
+    setDiagnostics("Testing ai-generate ping...");
+    const result = await callEdge({ mode: "ping" });
+    setDiagnostics(JSON.stringify(result, null, 2));
+  }
+
+  async function testHello() {
+    setDiagnostics("Testing hello function...");
+    const result = await callEdge({ test: "hello" }, "hello");
+    setDiagnostics(JSON.stringify(result, null, 2));
+  }
 
   async function send() {
     const say = input.trim();
@@ -32,23 +46,20 @@ export default function Chat() {
 
     try {
       setBusy(true);
-      const res = await fetch("/functions/v1/ai-generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          mode: "chat",
-          messages: newMessages.map(m => ({ 
-            role: m.role, 
-            content: m.text 
-          })),
-        }),
+      const result = await callEdge({
+        mode: "chat",
+        prompt: say,
+        messages: newMessages.map(m => ({ 
+          role: m.role, 
+          content: m.text 
+        })),
       });
       
-      const data = await res.json();
-      if (data?.reply) {
-        setMessages(prev => [...prev, { role: "assistant", text: data.reply, ts: Date.now() }]);
+      if (result.ok && result.json?.reply) {
+        setMessages(prev => [...prev, { role: "assistant", text: result.json.reply, ts: Date.now() }]);
       } else {
-        setMessages(prev => [...prev, { role: "assistant", text: `Error: ${data?.error || 'No reply from AI'}`, ts: Date.now() }]);
+        const errorMsg = result.json?.error || result.raw || 'No reply from AI';
+        setMessages(prev => [...prev, { role: "assistant", text: `Error: ${errorMsg}`, ts: Date.now() }]);
       }
     } catch (err: any) {
       setMessages(prev => [...prev, { role: "assistant", text: `Error talking to AI: ${err.message}`, ts: Date.now() }]);
@@ -61,10 +72,28 @@ export default function Chat() {
     <div className="max-w-4xl mx-auto p-6 space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Chat with Copilot</h1>
-        <Button variant="outline" onClick={() => window.location.reload()}>
-          Refresh
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={testPing}>
+            Test AI
+          </Button>
+          <Button variant="outline" size="sm" onClick={testHello}>
+            Test Hello
+          </Button>
+          <Button variant="outline" onClick={() => window.location.reload()}>
+            Refresh
+          </Button>
+        </div>
       </div>
+
+      {diagnostics && (
+        <Card className="p-4 bg-muted/50">
+          <h3 className="text-sm font-medium mb-2">Function Diagnostics:</h3>
+          <pre className="text-xs overflow-auto">{diagnostics}</pre>
+          <Button variant="ghost" size="sm" onClick={() => setDiagnostics("")} className="mt-2">
+            Clear
+          </Button>
+        </Card>
+      )}
 
       <Card className="min-h-[400px] p-4">
         <div className="space-y-4 mb-4">

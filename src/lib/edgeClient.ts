@@ -5,10 +5,10 @@
  *   • handles non-JSON / HTML responses defensively
  *   • includes apikey header when available (Supabase expects it in some setups)
  */
-export async function callEdge(payload: any) {
+export async function callEdge(payload: any, functionName: string = "ai-generate") {
   const url =
     (import.meta as any).env?.VITE_SUPABASE_URL?.replace(/\/+$/, "") +
-    "/functions/v1/ai-generate";
+    `/functions/v1/${functionName}`;
 
   const apikey = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || "";
   const res = await fetch(url, {
