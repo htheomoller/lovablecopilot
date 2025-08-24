@@ -1,59 +1,38 @@
 /**
- * AI Edge caller — uses DIRECT Supabase Invoke URL to avoid proxy 404s.
- * Requires:
- *   • VITE_SUPABASE_URL       (e.g. https://.supabase.co)
- *   • VITE_SUPABASE_ANON_KEY  (from Supabase > Project Settings > API)
+ * Tiny client for our edge function.
+ * Uses environment:
+ *   • VITE_SUPABASE_URL
+ *   • VITE_SUPABASE_ANON_KEY (AKA publishable key)
  */
-export type EdgeMode = 'ping' | 'chat' | 'nlu' | 'roadmap';
+const url = import.meta.env.VITE_SUPABASE_URL as string;
+const anon = (import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY) as string;
 
-const SUPA_URL = import.meta.env.VITE_SUPABASE_URL as string | undefined;
-const SUPA_ANON = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
-
-const AI_PATH = '/functions/v1/ai-generate';
-
-export function currentAiEndpoint() {
-  if (!SUPA_URL) return '(missing VITE_SUPABASE_URL)';
-  return `${SUPA_URL.replace(/\/+$/,'')}${AI_PATH}`;
+if (!url || !anon) {
+  // Surface early for DEV
+  console.warn("Missing VITE_SUPABASE_URL or ANON/PUBLISHABLE key");
 }
 
-function ensureEnv() {
-  if (!SUPA_URL || !SUPA_ANON) {
-    const miss = [
-      !SUPA_URL ? 'VITE_SUPABASE_URL' : null,
-      !SUPA_ANON ? 'VITE_SUPABASE_ANON_KEY' : null,
-    ].filter(Boolean).join(', ');
-    throw new Error(`Missing required env: ${miss}`);
-  }
-}
-
-async function safeJson(res: Response) {
-  const text = await res.text();
-  try { return { ok: true, json: JSON.parse(text), raw: text, status: res.status }; }
-  catch { return { ok: false, json: null, raw: text, status: res.status }; }
-}
-
-export async function callEdge(payload: any) {
-  ensureEnv();
-  const url = currentAiEndpoint();
-  const res = await fetch(url, {
-    method: 'POST',
+async function call(mode: "ping" | "chat" | "extract" | "roadmap", body: Record<string, any>) {
+  const endpoint = `${url}/functions/v1/ai-generate`;
+  const res = await fetch(endpoint, {
+    method: "POST",
     headers: {
-      'Content-Type':'application/json',
-      'Authorization': `Bearer ${SUPA_ANON}`,
-      'apikey': SUPA_ANON,
+      "Content-Type": "application/json",
+      "apikey": anon || "",
+      "Authorization": `Bearer ${anon || ""}`,
     },
-    body: JSON.stringify(payload ?? {}),
+    body: JSON.stringify({ mode, ...body }),
   });
-  const parsed = await safeJson(res);
-  if (!parsed.ok) {
-    throw new Error(`Non-JSON from edge (status ${parsed.status}): ${parsed.raw?.slice(0,200)}`);
+  const raw = await res.text();
+  let json: any = null;
+  try { json = JSON.parse(raw); } catch { /* non-JSON */ }
+  if (!res.ok || !json) {
+    throw new Error(`Non-JSON from edge (status ${res.status}): ${raw?.slice(0, 200)}`);
   }
-  if (res.status < 200 || res.status >= 300) {
-    throw new Error(`Edge error ${res.status}: ${parsed.raw?.slice(0,200)}`);
-  }
-  return parsed.json;
+  return { ok: res.ok, status: res.status, json, raw };
 }
 
-export async function pingEdge() {
-  return callEdge({ mode: 'ping' });
-}
+export async function aiPing() { return call("ping", {}); }
+export async function aiChat(prompt: string) { return call("chat", { prompt }); }
+export async function aiExtract(prompt: string) { return call("extract", { prompt }); }
+export async function aiRoadmap(answers: any) { return call("roadmap", { answers }); }
