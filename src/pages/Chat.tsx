@@ -36,17 +36,18 @@ async function callEdge(payload: any) {
 }
 
 export default function Chat() {
-  const [messages, setMessages] = useState<ChatMsg[]>(() => load<ChatMsg[]>('cp_chat_messages_v1', []));
-  const [answers, setAnswers]   = useState<Answers>(() => load<Answers>('cp_chat_answers_v1', {}));
-  const [style, setStyle]       = useState<'eli5'|'intermediate'|'developer'>(() => load<'eli5'|'intermediate'|'developer'>('cp_chat_style_v1','eli5'));
-  const [answersStyleChosen, setAnswersStyleChosen] = useState<boolean>(() => load<boolean>('cp_style_chosen_v1', false));
-  const [input, setInput]       = useState('');
-  const [busy, setBusy]         = useState(false);
+  // --- persistent storage keys (keep in one place) ---
+  const STORAGE = {
+    answers: 'cp_chat_answers_v1',
+    session: 'cp_chat_session_v1'
+  } as const;
 
-  const setAnswerStyle = (newStyle: 'eli5'|'intermediate'|'developer') => {
-    setStyle(newStyle);
-    save('cp_chat_style_v1', newStyle);
-  };
+  const [messages, setMessages] = useState<ChatMsg[]>(() => load<ChatMsg[]>('cp_chat_messages_v1', []));
+  const [answers, setAnswers] = useState<Answers>(() => load<Answers>('cp_chat_answers_v1', {}));
+  const [answerStyle, setAnswerStyle] = useState<'eli5'|'intermediate'|'developer'>('eli5');
+  const [answersStyleChosen, setAnswersStyleChosen] = useState(false);
+  const [input, setInput] = useState('');
+  const [busy, setBusy] = useState(false);
 
   // Warm, lively greeting on first load
   useEffect(() => {
@@ -61,8 +62,20 @@ export default function Chat() {
 
   useEffect(() => { save('cp_chat_messages_v1', messages); }, [messages]);
   useEffect(() => { save('cp_chat_answers_v1', answers); }, [answers]);
-  useEffect(() => { save('cp_chat_style_v1', style); }, [style]);
+  useEffect(() => { save('cp_chat_style_v1', answerStyle); }, [answerStyle]);
   useEffect(() => { save('cp_style_chosen_v1', answersStyleChosen); }, [answersStyleChosen]);
+
+  // --- Reset helper: clears local state + localStorage, then re-seeds greeting ---
+  function resetChat() {
+    try {
+      localStorage.removeItem(STORAGE.answers);
+      localStorage.removeItem(STORAGE.session);
+    } catch {}
+    setAnswers({});
+    setAnswerStyle('eli5');
+    setAnswersStyleChosen(false);
+    setMessages([{ role: 'assistant', text: "Hi — let's get your idea moving! I'll ask a few quick questions, keep notes for you, and when I have enough, I'll propose a roadmap. You can jump in with questions anytime.\n\nHow should I talk to you today? Say: ELI5 (very simple), Intermediate, or Developer.", ts: Date.now() }]);
+  }
 
   const push = (m: ChatMsg) => setMessages(prev => [...prev, m]);
 
@@ -76,23 +89,25 @@ export default function Chat() {
 
     // --- STEP 1: Style selection guard ---
     if (!answersStyleChosen) {
+      // persist minimal session marker so refresh keeps style next time (optional)
       const lower = say.toLowerCase();
-      if (lower.includes('eli5') || lower.includes('simple')) {
-        setAnswerStyle('eli5');
-        setMessages(m => [...m, { role: 'assistant', text: 'Got it — I will keep it super simple (ELI5). Now, what\'s your app idea in one short line?', ts: Date.now() }]);
+      const choose = (style: 'eli5'|'intermediate'|'developer', confirmText: string) => {
+        setAnswerStyle(style);
         setAnswersStyleChosen(true);
+        try { localStorage.setItem(STORAGE.session, JSON.stringify({ style, ts: Date.now() })); } catch {}
+        setMessages(m => [...m, { role: 'assistant', text: confirmText, ts: Date.now() }]);
+      };
+
+      if (lower.includes('eli5') || lower.includes('simple')) {
+        choose('eli5', "Got it — I'll keep it super simple (ELI5). Now, what's your app idea in one short line?");
         return;
       }
       if (lower.includes('intermediate')) {
-        setAnswerStyle('intermediate');
-        setMessages(m => [...m, { role: 'assistant', text: 'Great — I will explain things at an intermediate level. What\'s your app idea?', ts: Date.now() }]);
-        setAnswersStyleChosen(true);
+        choose('intermediate', "Great — I'll explain at an intermediate level. What's your app idea?");
         return;
       }
       if (lower.includes('developer') || lower.includes('technical')) {
-        setAnswerStyle('developer');
-        setMessages(m => [...m, { role: 'assistant', text: 'Okay — I will use developer-level detail. What\'s your app idea?', ts: Date.now() }]);
-        setAnswersStyleChosen(true);
+        choose('developer', "Okay — I'll use developer-level detail. What's your app idea?");
         return;
       }
       // If style not picked yet → re-ask
@@ -104,6 +119,13 @@ export default function Chat() {
     try {
       setBusy(true);
       const data = await callEdge({ mode: 'nlu', prompt: say });
+      // persist answers snapshot whenever we capture a field
+      if (data?.field) {
+        try {
+          const next = { ...(answers as any), [data.field]: data.value };
+          localStorage.setItem(STORAGE.answers, JSON.stringify(next));
+        } catch {}
+      }
       if (data?.reply) setMessages(m => [...m, { role: 'assistant', text: data.reply, ts: Date.now() }]);
       if (data?.field) {
         setAnswers(prev => ({ ...prev, [data.field]: data.value }));
@@ -126,6 +148,13 @@ export default function Chat() {
       <div className="flex items-center justify-between">
         <h1 className="text-lg font-medium">Chat with AI</h1>
         <button className="px-3 py-1 rounded bg-secondary text-secondary-foreground" onClick={() => window.location.reload()}>Refresh</button>
+        <button
+          type="button"
+          onClick={resetChat}
+          className="px-3 py-1 bg-destructive text-destructive-foreground rounded hover:bg-destructive/80 ml-2"
+        >
+          Reset
+        </button>
       </div>
 
       <div className="space-y-2">
