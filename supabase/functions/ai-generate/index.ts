@@ -1,21 +1,28 @@
+// Minimal, rock-solid baseline Edge Function (Deno)
+// - Handles CORS preflight first
+// - Always returns JSON
+// - No OpenAI call yet (just echoes back)
+
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-export const corsHeaders = {
+const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
 };
 
 serve(async (req: Request) => {
-  // Handle CORS preflight FIRST
+  // 1) CORS preflight MUST be first
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
 
   try {
     const { prompt } = await req.json();
-    if (!prompt) throw new Error("Missing 'prompt' in request body.");
+    if (!prompt) {
+      throw new Error("Missing 'prompt' in request body.");
+    }
 
-    // Baseline: do NOT call OpenAI yet. Just echo.
     const payload = {
       success: true,
       reply: `Baseline echo: "${prompt}"`,
@@ -26,7 +33,8 @@ serve(async (req: Request) => {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (err: any) {
-    return new Response(JSON.stringify({ success: false, error: String(err?.message || err) }), {
+    const message = typeof err?.message === "string" ? err.message : String(err);
+    return new Response(JSON.stringify({ success: false, error: message }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

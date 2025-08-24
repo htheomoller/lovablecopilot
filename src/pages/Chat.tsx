@@ -1,62 +1,61 @@
-import { useState } from "react";
-import { callEdge } from "@/lib/ai";
+import React, { useState } from "react";
+import { callEdgeEcho } from "@/lib/edge";
+
+type Msg = { role: "user" | "assistant"; text: string; ts: number };
 
 export default function Chat() {
-  const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<{role:'user'|'assistant'; text:string; ts:number}[]>([
-    { role: 'assistant', text: "Hi! Tell me anything and I'll echo it from the edge function.", ts: Date.now() }
+  const [messages, setMessages] = useState<Msg[]>([
+    { role: "assistant", text: "Hi! Type anything and I will echo it from the edge function.", ts: Date.now() },
   ]);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
 
   async function send() {
     const say = input.trim();
-    if (!say) return;
+    if (!say || busy) return;
     setInput("");
-
-    // 1) show user message immediately
-    setMessages(m => [...m, { role: 'user', text: say, ts: Date.now() }]);
-
-    // 2) call edge
+    setMessages(m => [...m, { role: "user", text: say, ts: Date.now() }]);
+    setBusy(true);
     try {
-      const data = await callEdge(say);
+      const data = await callEdgeEcho(say);
       const reply = data?.reply ?? "No reply.";
-      setMessages(m => [...m, { role: 'assistant', text: reply, ts: Date.now() }]);
+      setMessages(m => [...m, { role: "assistant", text: reply, ts: Date.now() }]);
     } catch (err: any) {
-      setMessages(m => [...m, { role: 'assistant', text: `Error: ${err.message || err}`, ts: Date.now() }]);
+      setMessages(m => [...m, { role: "assistant", text: `Error: ${err.message || err}`, ts: Date.now() }]);
+    } finally {
+      setBusy(false);
     }
   }
 
   return (
-    <div className="flex flex-col gap-3 p-4">
-      <div className="flex justify-between items-center">
-        <h2 className="text-xl font-semibold">Chat with AI</h2>
-        <button 
-          onClick={() => window.location.reload()} 
-          className="px-3 py-1 bg-secondary text-secondary-foreground rounded hover:bg-secondary/80"
-        >
+    <div className="mx-auto max-w-3xl p-4 space-y-4">
+      <div className="flex items-center justify-between">
+        <h1 className="text-xl font-semibold">Chat with AI</h1>
+        <button
+          onClick={() => window.location.reload()}
+          className="px-3 py-1 bg-secondary text-secondary-foreground rounded hover:bg-secondary/80">
           Refresh
         </button>
       </div>
 
-      <div className="flex flex-col gap-2 min-h-[400px] max-h-[400px] overflow-y-auto border rounded p-3">
+      <div className="space-y-2">
         {messages.map((m, i) => (
-          <div key={i} className={`rounded-lg p-2 max-w-xs ${m.role === 'user' ? 'self-end bg-primary text-primary-foreground' : 'self-start bg-muted'}`}>
+          <div key={i} className={`p-3 rounded ${m.role === "user" ? "bg-blue-50" : "bg-gray-50"}`}>
             {m.text}
           </div>
         ))}
+        {busy && <div className="text-sm text-muted-foreground">…calling edge</div>}
       </div>
 
       <div className="flex gap-2">
         <input
           value={input}
-          onChange={e => setInput(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' ? send() : null}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => (e.key === "Enter" ? send() : null)}
           placeholder="Type your message…"
           className="flex-1 px-3 py-2 border rounded"
         />
-        <button 
-          onClick={send}
-          className="px-4 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90"
-        >
+        <button onClick={send} className="px-3 py-2 bg-primary text-primary-foreground rounded disabled:opacity-50" disabled={busy}>
           Send
         </button>
       </div>
