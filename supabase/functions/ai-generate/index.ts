@@ -12,7 +12,7 @@ serve(async (req: Request) => {
   }
 
   try {
-    const { prompt = "", mode = "nlu", answers = {} } = await req.json();
+    const { prompt = "", mode = "nlu", answers = {}, field = "", context = "" } = await req.json();
 
     const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
     if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set");
@@ -21,24 +21,18 @@ serve(async (req: Request) => {
     let responseSchema = {};
 
     if (mode === "nlu") {
-      system = `You are a helpful onboarding assistant. Classify the user message into one of these fields: style, idea, name, audience, features, privacy, auth, deep_work_hours.
-      
-For each field:
-- style: conversation style preference (eli5, intermediate, developer)  
-- idea: core app concept
-- name: app name (if user says "invent one", generate 3 short creative names, pick the best one)
-- audience: target users
-- features: key features (array, comma separated)
-- privacy: data visibility preference
-- auth: authentication method
-- deep_work_hours: focused work hours per day
-
-Return JSON with { field, value, shortValue, reply } where:
-- value: full captured value
-- shortValue: concise 1-liner version
-- reply: natural, conversational reflection (not robotic)
-
-If user says "invent one" for name, generate 3 options, pick one, and reply: "Let's go with [NAME] for now. Easy to change later."`;
+      if (field === "style") {
+        system = `You are a friendly onboarding assistant. The user is answering what conversation style they prefer. Extract their preference (eli5, intermediate, or developer) and respond naturally. If they say something like "not technical" or "simple", map to eli5. Return { field: "style", value: [extracted style], shortValue: [style], reply: [natural confirmation] }`;
+      } else if (field === "name_suggest") {
+        system = `You are a creative assistant. Generate ONE relevant, project-related app name based on the idea: "${context}". Make it short, memorable, and related to the concept. Return { field: "name", value: [generated name], shortValue: [generated name], reply: "Let's go with [NAME] for now. Easy to change later." }`;
+      } else if (field === "audience") {
+        system = `You are a helpful assistant. Take the user's description of their target audience and summarize it into one clean, concise line. Return { field: "audience", value: [original], shortValue: [clean summary], reply: [natural reflection asking for confirmation] }`;
+      } else if (field === "features") {
+        system = `You are a helpful assistant. Extract the key features from the user's description into a structured list. Categorize if possible (Core, Monetization, etc.). Return { field: "features", value: [array of features], shortValue: [comma-separated list], reply: [natural reflection showing categories, asking for confirmation] }`;
+      } else {
+        // General field capture
+        system = `You are a helpful onboarding assistant. Classify and extract the user's response for the field: ${field}. Return JSON with { field: "${field}", value: [extracted value], shortValue: [concise version], reply: [natural, conversational reflection] }`;
+      }
 
       responseSchema = {
         name: "classification",
@@ -54,7 +48,17 @@ If user says "invent one" for name, generate 3 options, pick one, and reply: "Le
         }
       };
     } else if (mode === "summary") {
-      system = `You are a helpful assistant. Take the collected answers and create a concise, friendly summary of the user's project. Make it conversational and clear.`;
+      system = `You are a helpful assistant. Take the collected answers and create a structured summary. Format as:
+      
+Idea: [idea]
+Name: [name]  
+Audience: [audience]
+Features: [features]
+Privacy: [privacy]
+Auth: [auth]
+Deep Work Hours: [deep_work_hours]
+
+Then ask: "Does this look right? Want to edit anything?"`;
       
       responseSchema = {
         name: "summary",
@@ -68,7 +72,7 @@ If user says "invent one" for name, generate 3 options, pick one, and reply: "Le
         }
       };
     } else if (mode === "roadmap") {
-      system = `You are a helpful project assistant. Create a conversational roadmap with 3-4 practical steps for building the user's app. Keep it friendly and actionable.`;
+      system = `You are a helpful project assistant. Create a conversational roadmap with 3-4 practical steps for building the user's app based on their answers. Keep it friendly and actionable. End by asking: "Want me to revise or adjust anything?"`;
       
       responseSchema = {
         name: "roadmap",
@@ -82,7 +86,7 @@ If user says "invent one" for name, generate 3 options, pick one, and reply: "Le
         }
       };
     } else {
-      system = `You are a friendly copilot. Reply naturally and concisely.`;
+      system = `You are a friendly copilot. Reply naturally and conversationally.`;
       responseSchema = {
         name: "general",
         schema: {
