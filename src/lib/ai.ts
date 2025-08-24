@@ -1,41 +1,34 @@
-export type EdgeChatMode = 'chat' | 'nlu' | 'summary' | 'roadmap';
+// Simple client for our edge function (always returns JSON or throws informative error)
+export type Answers = Partial<{
+  answer_style: 'eli5' | 'intermediate' | 'developer'
+  idea: string
+  name: string
+  audience: string
+  features: string[]
+  privacy: 'Private' | 'Share via link' | 'Public'
+  auth: 'Google OAuth' | 'Magic email link' | 'None (dev only)'
+  deep_work_hours: '0.5' | '1' | '2' | '4+'
+}>;
 
-// Robust caller: try relative proxy first, then direct Supabase URL from env
-export async function callEdge(prompt: string, mode: EdgeChatMode = 'chat', answers?: any, field?: string, context?: string) {
-  const rel = '/functions/v1/ai-generate';
-  const directBase = import.meta.env.VITE_SUPABASE_URL as string | undefined;
-  const anon = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
-
-  // helper to fetch and *force* JSON parse (throw on HTML/404)
-  const fetchJSON = async (url: string, init: RequestInit) => {
-    const r = await fetch(url, init);
-    const text = await r.text();
-    try {
-      const j = JSON.parse(text);
-      return { ok: r.ok, status: r.status, json: j };
-    } catch {
-      throw new Error(`Non-JSON from edge (status ${r.status}):\n${text.slice(0,200)}`);
-    }
-  };
-
-  const body = JSON.stringify({ mode, prompt, answers, field, context });
-  const init: RequestInit = {
+async function postEdge(payload: any) {
+  const res = await fetch('/functions/v1/ai-generate', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...(anon ? { 'apikey': anon, 'Authorization': `Bearer ${anon}` } : {}) },
-    body
-  };
-
-  // 1) try Lovable proxy path
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const text = await res.text();
   try {
-    const a = await fetchJSON(rel, init);
-    if (!a.ok) throw new Error(`Edge error ${a.status}: ${JSON.stringify(a.json)}`);
-    return a.json;
-  } catch (e1) {
-    // 2) fallback to direct Supabase URL
-    if (!directBase) throw e1;
-    const url = `${directBase.replace(/\/$/, '')}/functions/v1/ai-generate`;
-    const b = await fetchJSON(url, init);
-    if (!b.ok) throw new Error(`Edge error ${b.status}: ${JSON.stringify(b.json)}`);
-    return b.json;
+    const j = JSON.parse(text);
+    return j;
+  } catch {
+    throw new Error(`Non-JSON from edge (status ${res.status}):\n${text.slice(0, 400)}`);
   }
+}
+
+export async function nlu(prompt: string, answers: Answers, style: Answers['answer_style'] = 'intermediate') {
+  return postEdge({ mode: 'nlu', prompt, style, answers });
+}
+
+export async function makeRoadmap(answers: Answers, style: Answers['answer_style'] = 'intermediate') {
+  return postEdge({ mode: 'roadmap', answers, style });
 }
