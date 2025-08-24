@@ -23,8 +23,8 @@ function nluExtract(raw: string): { field: string|null; value: any; reply: strin
     const items = prompt.split(/[,;\n]/).map(s => s.trim()).filter(Boolean).slice(0,6);
     if (items.length) return { field: "features", value: items, reply: `Got it: **features** → "${items.join(", ")}".` };
   }
-  if (/\b(name|call it)\b/.test(lower) || /^[- a-z0-9_]{3,20}$/i.test(prompt)) {
-    const val = prompt.replace(/^(name:?\s*)/i, "").trim() || prompt.trim();
+  if (/\b(name|call it)\b/.test(lower)) {
+    const val = prompt.replace(/^(name:?\s*)/i, "").trim();
     const clean = val || `Project-${Math.random().toString(36).slice(2,6)}`;
     return { field: "name", value: clean, reply: `Got it: **name** → "${clean}".` };
   }
