@@ -1,21 +1,10 @@
-/* Why: Guided persistent onboarding with session management */
+/* Why: Conversational onboarding with NLU and session persistence */
 export type AnswerStyle = 'eli5' | 'intermediate' | 'developer';
-export type QuestionType = 'text' | 'multi-select' | 'single-select';
-
-export interface Question {
-  id: string;
-  prompt: string;
-  key: string;
-  type: QuestionType;
-  options?: string[];
-  required?: boolean;
-}
 
 export interface Message {
-  id: string;
   role: 'user' | 'assistant';
-  content: string;
-  timestamp: Date;
+  text: string;
+  ts: number;
 }
 
 export interface ChatSession {
@@ -27,131 +16,49 @@ export interface ChatSession {
   timestamp: number;
 }
 
-export const QUESTIONS: Question[] = [
-  {
-    id: 'app_idea',
-    prompt: "What's your app idea in one line?",
-    key: 'idea',
-    type: 'text',
-    required: true
-  },
-  {
-    id: 'audience',
-    prompt: "Who is it for? (your ideal customer/user)",
-    key: 'audience',
-    type: 'text',
-    required: true
-  },
-  {
-    id: 'features',
-    prompt: "Top 3 must-have features",
-    key: 'features',
-    type: 'multi-select',
-    options: [
-      'User authentication',
-      'Real-time messaging',
-      'File uploads',
-      'Payment processing',
-      'Search functionality',
-      'Notifications',
-      'Dashboard/Analytics',
-      'Social features',
-      'API integration',
-      'Mobile responsive'
-    ]
-  },
-  {
-    id: 'privacy',
-    prompt: "Data visibility preference",
-    key: 'privacy',
-    type: 'single-select',
-    options: ['Private', 'Share via link', 'Public']
-  },
-  {
-    id: 'auth',
-    prompt: "Authentication preference",
-    key: 'auth',
-    type: 'single-select',
-    options: ['Google OAuth', 'Magic email link', 'None (dev only)']
-  },
-  {
-    id: 'deep_work_hours',
-    prompt: "Daily focused work hours",
-    key: 'deep_work_hours',
-    type: 'single-select',
-    options: ['0.5', '1', '2', '4+']
-  }
-];
+const KEY = 'cp_chat_session_v1';
 
-const SESSION_KEY = 'cp_chat_session_v1';
+export const defaultSession = (): ChatSession => ({
+  step: 0,
+  answerStyle: 'eli5',
+  answers: {},
+  messages: [],
+  completed: false,
+  timestamp: Date.now(),
+});
 
-export function defaultSession(): ChatSession {
-  return {
-    step: -1, // -1 = needs answer style, 0+ = question index
-    answerStyle: 'eli5',
-    answers: {},
-    messages: [{
-      id: 'greeting',
-      role: 'assistant',
-      content: "Hi, I'm your Copilot. First, how technical should I be? Choose: ELI5, Intermediate, or Developer.",
-      timestamp: new Date()
-    }],
-    completed: false,
-    timestamp: Date.now()
-  };
-}
-
-export function loadSession(): ChatSession {
+export const loadSession = (): ChatSession => {
   try {
-    const saved = localStorage.getItem(SESSION_KEY);
-    if (!saved) return defaultSession();
-    
-    const parsed = JSON.parse(saved);
-    // Restore Date objects
-    parsed.messages = parsed.messages.map((msg: any) => ({
-      ...msg,
-      timestamp: new Date(msg.timestamp)
-    }));
-    
-    return parsed;
+    const j = localStorage.getItem(KEY);
+    return j ? JSON.parse(j) : defaultSession();
   } catch {
     return defaultSession();
   }
-}
+};
 
-export function saveSession(session: ChatSession): void {
+export const saveSession = (s: ChatSession) => {
   try {
-    localStorage.setItem(SESSION_KEY, JSON.stringify({
-      ...session,
-      timestamp: Date.now()
-    }));
-  } catch (error) {
-    console.warn('Failed to save chat session:', error);
-  }
-}
+    localStorage.setItem(KEY, JSON.stringify({ ...s, timestamp: Date.now() }));
+  } catch {}
+};
 
-export function clearSession(): void {
-  localStorage.removeItem(SESSION_KEY);
-}
+export const clearSession = () => {
+  try {
+    localStorage.removeItem(KEY);
+  } catch {}
+};
 
-export function hasStoredSession(): boolean {
-  return localStorage.getItem(SESSION_KEY) !== null;
-}
-
-export function addMessage(session: ChatSession, role: 'user' | 'assistant', content: string): ChatSession {
-  const message: Message = {
-    id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
-    role,
-    content,
-    timestamp: new Date()
-  };
-  
-  return {
-    ...session,
-    messages: [...session.messages, message],
-    timestamp: Date.now()
-  };
-}
+export const nextQuestion = (s: ChatSession): string => {
+  const a = s.answers;
+  if (!a.idea) return "Tell me your app idea in one short line (what it does).";
+  if (!a.name) return "Do you have a name? If not, say 'invent one'.";
+  if (!a.audience) return "Who is it for (ideal user)?";
+  if (!a.features || a.features.length === 0) return "List top 2–3 must-have features (comma separated).";
+  if (!a.privacy) return "Data visibility: Private, Share via link, or Public?";
+  if (!a.auth) return "Sign-in: Google OAuth, Magic email link, or None (dev only)?";
+  if (!a.deep_work_hours) return "Daily focused work hours: 0.5, 1, 2, or 4+?";
+  return '';
+};
 
 export function generateMilestones(answers: Record<string, any>, userId: string) {
   const deepWorkMultiplier = {
