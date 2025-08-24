@@ -1,5 +1,5 @@
 /**
- * Tiny client for our edge function.
+ * AI client for edge function calls
  * Uses environment:
  *   • VITE_SUPABASE_URL
  *   • VITE_SUPABASE_ANON_KEY (AKA publishable key)
