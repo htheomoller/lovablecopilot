@@ -1,328 +1,93 @@
-import React, { useEffect, useState } from 'react'
-import { useAuth } from '@/contexts/AuthContext'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Badge } from '@/components/ui/badge'
-import { useToast } from '@/hooks/use-toast'
-import { supabase } from '@/integrations/supabase/client'
-import { logBreadcrumb } from '@/lib/devlog'
-import { aiChat, aiNLU, aiRoadmap } from '@/lib/ai'
-import {
-  type ChatSession,
-  type Message,
-  loadSession,
-  saveSession,
-  clearSession,
-  defaultSession,
-  nextQuestion
-} from '@/lib/chatWizard'
+import React, { useEffect, useState } from 'react';
+import { append, defaultSession, loadSession, nextQuestion, saveSession, ChatMsg } from '@/lib/chatWizard';
 
 export default function Chat() {
-  const { user } = useAuth()
-  const { toast } = useToast()
-  const [session, setSession] = useState<ChatSession>(defaultSession())
-  const [input, setInput] = useState('')
-  const [isLoading, setIsLoading] = useState(false)
-  const [style, setStyle] = useState<'eli5' | 'intermediate' | 'developer'>('eli5')
+  const [session, setSession] = useState(loadSession());
+  const [input, setInput] = useState('');
+  const [busy, setBusy] = useState(false);
 
-  // Load session and initialize greeting
+  // boot greeting once, and NEVER overwrite user turns
   useEffect(() => {
-    const loaded = loadSession()
-    setSession(loaded)
-    setStyle(loaded.answerStyle)
-    
-    // Add greeting if no messages
-    if (loaded.messages.length === 0) {
-      const greeting: Message = {
-        role: 'assistant',
-        text: "I'll chat naturally and keep notes for your project. First, how technical should I be? (ELI5 • Intermediate • Developer)",
-        ts: Date.now()
-      }
-      const withGreeting = { ...loaded, messages: [greeting] }
-      setSession(withGreeting)
-      saveSession(withGreeting)
+    if (session.messages.length === 0) {
+      let s = append(session, { role: 'assistant', text: "I'll chat naturally and keep notes for your project. First, how technical should I be? (ELI5 • Intermediate • Developer)", ts: Date.now() });
+      setSession(s);
     }
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // Auto-save session on changes
-  useEffect(() => {
-    if (session.timestamp > 0) {
-      saveSession({ ...session, answerStyle: style })
-    }
-  }, [session, style])
-
-  const addMessage = (role: 'user' | 'assistant', text: string): ChatSession => {
-    const message: Message = { role, text, ts: Date.now() }
-    return {
-      ...session,
-      messages: [...session.messages, message],
-      timestamp: Date.now()
-    }
-  }
+  const push = (m: ChatMsg) => { const ns = append(session, m); setSession(ns); };
 
   const handleSend = async () => {
-    const say = input.trim()
-    if (!say) return
+    const say = input.trim(); if (!say) return;
+    push({ role: 'user', text: say, ts: Date.now() }); // persist USER turn immediately
+    setInput('');
 
-    const userMsg = addMessage('user', say)
-    setSession(userMsg)
-    setInput('')
-    setIsLoading(true)
+    // quick style switch
+    if (/^(eli5|intermediate|developer)$/i.test(say)) {
+      const picked = say.toLowerCase() as any; const ns = { ...session, answerStyle: picked }; saveSession(ns); setSession(ns);
+      push({ role: 'assistant', text: `Great — I'll explain like ${picked}. ${nextQuestion(ns) || "Say 'generate roadmap' when you're ready."}`, ts: Date.now() });
+      return;
+    }
 
-    try {
-      // Handle style selection
-      if (/^(eli5|intermediate|developer)$/i.test(say)) {
-        const picked = say.toLowerCase() as 'eli5' | 'intermediate' | 'developer'
-        setStyle(picked)
-        const bot = addMessage('assistant', `Great — I'll explain like ${picked}. ${nextQuestion(session) || 'Say "generate roadmap" when you\'re ready.'}`)
-        setSession(bot)
-        setIsLoading(false)
-        return
-      }
-
-      // Check if we need a field via NLU
-      const q = nextQuestion(session)
-      
-      if (q) {
-        // Use NLU to extract structured data
-        const nluData = await aiNLU(say, style)
-        
-        if (nluData.field && nluData.value) {
-          const updated = {
-            ...userMsg,
-            answers: { ...userMsg.answers, [nluData.field]: nluData.value }
-          }
-          setSession(updated)
-          
-          const reflect = addMessage('assistant', `Got it: **${nluData.field}** → "${nluData.value}". ${nextQuestion(updated) || 'If everything looks right, say: generate roadmap.'}`)
-          setSession(reflect)
+    // if we still need a field → NLU
+    const q = nextQuestion(session);
+    if (q) {
+      setBusy(true);
+      try {
+        const res = await fetch('/functions/v1/ai-generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'nlu', answer_style: session.answerStyle, prompt: say }) });
+        const data = await res.json();
+        // ALWAYS echo back what we captured so the chat feels alive
+        if (data && data.field && data.value) {
+          const ns = { ...session, answers: { ...session.answers, [data.field]: data.value } };
+          saveSession(ns); setSession(ns);
+          push({ role: 'assistant', text: data.reply || `Got it: **${data.field}** → "${data.value}". ${nextQuestion(ns) || "If everything looks right, say: generate roadmap."}`, ts: Date.now() });
         } else {
-          // Friendlier, contextual clarification with example based on the next required field
-          const next = nextQuestion(session);
-          const examples: Record<string, string> = {
-            "Tell me your app idea in one short line (what it does).": 'e.g., "AI photo restoration for old family pictures."',
-            "Do you have a name? If not, say 'invent one'.": 'e.g., "RetroFix" or "invent one".',
-            "Who is it for (ideal user)?": 'e.g., "Families with old albums"',
-            "List top 2–3 must-have features (comma separated).": 'e.g., "upload, scratch removal, colorize"',
-            "Data visibility: Private, Share via link, or Public?": "Reply with: Private / Share via link / Public",
-            "Sign-in: Google OAuth, Magic email link, or None (dev only)?": "Reply with: Google OAuth / Magic email link / None",
-            "Daily focused work hours: 0.5, 1, 2, or 4+?": "Reply with: 0.5 / 1 / 2 / 4+"
-          };
-          const tip = next ? `\n\nExample: ${examples[next] || ""}` : "";
-          const fallback = addMessage('assistant', (nluData.reply || "Got it, could you phrase that more clearly?") + tip)
-          setSession(fallback)
+          push({ role: 'assistant', text: (data && data.reply) || 'Thanks — could you say that in one short line?', ts: Date.now() });
         }
-        setIsLoading(false)
-        return
-      }
+      } catch (e: any) {
+        push({ role: 'assistant', text: 'Error calling AI service, please try again.', ts: Date.now() });
+      } finally { setBusy(false); }
+      return;
+    }
 
-      // Handle roadmap generation
-      if (/^generate roadmap$/i.test(say)) {
-        if (!user) {
-          toast({
-            title: "Authentication required",
-            description: "Please sign in to generate your roadmap.",
-            variant: "destructive"
-          })
-          setIsLoading(false)
-          return
+    // roadmap trigger
+    if (/^generate roadmap$/i.test(say)) {
+      setBusy(true);
+      try {
+        const res = await fetch('/functions/v1/ai-generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'roadmap', answer_style: session.answerStyle, answers: session.answers }) });
+        const data = await res.json();
+        push({ role: 'assistant', text: data.reply || 'Roadmap ready.', ts: Date.now() });
+        if (Array.isArray(data.milestones) && data.milestones.length) {
+          push({ role: 'assistant', text: "I've generated milestones — check the Roadmap tab.", ts: Date.now() });
         }
-
-        const roadmapData = await aiRoadmap(session.answers, style)
-        
-        // Generate milestones (using existing generateMilestones logic)
-        const milestones = generateMilestones(session.answers, user.id)
-        const { error } = await supabase.from('ledger_milestones').insert(milestones)
-        
-        if (error) throw error
-        
-        // Log breadcrumb
-        await logBreadcrumb({
-          scope: 'chat',
-          summary: 'roadmap_generated',
-          details: {
-            answers: session.answers,
-            milestones_count: milestones.length,
-            answer_style: style
-          },
-          tags: ['onboarding', 'roadmap', 'milestones']
-        })
-        
-        let bot = addMessage('assistant', roadmapData.reply || 'Roadmap ready!')
-        bot = addMessage('assistant', `🎉 I've generated ${milestones.length} milestones — check the Roadmap tab.`)
-        bot.completed = true
-        setSession(bot)
-        
-        toast({
-          title: "Roadmap created!",
-          description: `Generated ${milestones.length} milestones for your project.`
-        })
-        
-        setIsLoading(false)
-        return
-      }
-
-      // General chat mode
-      const chatData = await aiChat(say, style)
-      const bot = addMessage('assistant', chatData.reply || 'I\'m here to help!')
-      setSession(bot)
-      
-    } catch (error: any) {
-      console.error('Chat error:', error)
-      const errorBot = addMessage('assistant', `Sorry, I encountered an error: ${error.message}`)
-      setSession(errorBot)
-      
-      toast({
-        title: "Error",
-        description: "Something went wrong. Please try again.",
-        variant: "destructive"
-      })
-    }
-    
-    setIsLoading(false)
-  }
-
-  const startNew = () => {
-    clearSession()
-    const fresh = defaultSession()
-    const greeting: Message = {
-      role: 'assistant',
-      text: "I'll chat naturally and keep notes for your project. First, how technical should I be? (ELI5 • Intermediate • Developer)",
-      ts: Date.now()
-    }
-    const withGreeting = { ...fresh, messages: [greeting] }
-    setSession(withGreeting)
-    saveSession(withGreeting)
-    setStyle('eli5')
-    setInput('')
-  }
-
-  // Helper function for milestone generation (simplified version)
-  const generateMilestones = (answers: Record<string, any>, userId: string) => {
-    const deepWorkMultiplier = {
-      '0.5': 2.0,
-      '1': 1.5,
-      '2': 1.0,
-      '4+': 0.8
-    }[answers.deep_work_hours] || 1.0
-
-    const authComplexity = {
-      'Google OAuth': 3,
-      'Magic email link': 2,
-      'None (dev only)': 1
-    }[answers.auth] || 2
-
-    const baseDate = new Date()
-    const addDays = (days: number) => {
-      const date = new Date(baseDate)
-      date.setDate(date.getDate() + Math.ceil(days * deepWorkMultiplier))
-      return date.toISOString().split('T')[0]
+      } catch (e: any) {
+        push({ role: 'assistant', text: 'Error generating roadmap — please try again.', ts: Date.now() });
+      } finally { setBusy(false); }
+      return;
     }
 
-    let currentDay = 0
-
-    return [
-      {
-        id: `setup-${Date.now()}`,
-        project: answers.idea?.slice(0, 50) || 'My App',
-        name: 'Setup & Auth',
-        status: 'planned',
-        duration_days: Math.ceil((3 + authComplexity) * deepWorkMultiplier),
-        owner_id: userId,
-        start_date: addDays(currentDay)
-      },
-      {
-        id: `core-${Date.now() + 1}`,
-        project: answers.idea?.slice(0, 50) || 'My App',
-        name: 'Core Features',
-        status: 'planned',
-        duration_days: Math.ceil((5 + (answers.features?.length || 3) * 1.5) * deepWorkMultiplier),
-        owner_id: userId,
-        start_date: addDays(currentDay += Math.ceil((3 + authComplexity) * deepWorkMultiplier))
-      },
-      {
-        id: `polish-${Date.now() + 2}`,
-        project: answers.idea?.slice(0, 50) || 'My App',
-        name: 'Polish & Deploy',
-        status: 'planned',
-        duration_days: Math.ceil(2 * deepWorkMultiplier),
-        owner_id: userId,
-        start_date: addDays(currentDay += Math.ceil((5 + (answers.features?.length || 3) * 1.5) * deepWorkMultiplier))
-      }
-    ]
-  }
-
-  if (!user) {
-    return (
-      <div className="max-w-4xl mx-auto p-4">
-        <div className="text-center">
-          <h1 className="text-2xl font-bold mb-4">Chat with AI</h1>
-          <p>Please sign in to start your guided onboarding.</p>
-        </div>
-      </div>
-    )
-  }
+    // light small‑talk
+    try {
+      const res = await fetch('/functions/v1/ai-generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'chat', answer_style: session.answerStyle, prompt: say }) });
+      const data = await res.json();
+      push({ role: 'assistant', text: data.reply || data.generatedText || '👍', ts: Date.now() });
+    } catch { push({ role: 'assistant', text: 'Error calling AI service, please try again.', ts: Date.now() }); }
+  };
 
   return (
-    <div className="max-w-4xl mx-auto p-4 h-[calc(100vh-8rem)] flex flex-col">
-      <div className="flex justify-between items-center mb-4">
-        <h1 className="text-2xl font-bold">Project Chat</h1>
-        <div className="flex gap-2 items-center">
-          <Button variant="outline" size="sm" onClick={startNew}>
-            Start New
-          </Button>
-          <Badge variant="secondary" className="text-xs">
-            {style} mode
-          </Badge>
-        </div>
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-2">
+        {session.messages.map((m, i) => (
+          <div key={i} className={m.role === 'user' ? 'self-end bg-blue-600 text-white rounded-xl px-3 py-2' : 'self-start bg-slate-100 rounded-xl px-3 py-2'}>
+            {m.text}
+          </div>
+        ))}
+        {busy && <div className="self-start text-sm opacity-60">…thinking</div>}
       </div>
-
-      <div className="flex flex-col h-full">
-        {/* Captured summary */}
-        <div className="flex flex-wrap gap-2 p-3 border-b bg-muted/30 text-xs">
-          {['idea','name','audience','features','privacy','auth','deep_work_hours'].map(key => (
-            session.answers?.[key] ? (
-              <span key={key} className="rounded-full bg-secondary px-2 py-1 text-secondary-foreground">
-                {key}: {Array.isArray(session.answers[key]) ? session.answers[key].join(', ') : session.answers[key]}
-              </span>
-            ) : null
-          ))}
-        </div>
-
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-3">
-          {session.messages.map((msg, i) => (
-            <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-[80%] rounded-2xl px-3 py-2 shadow-sm whitespace-pre-wrap ${msg.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-card border'}`}>
-                {msg.text}
-              </div>
-            </div>
-          ))}
-          
-          {isLoading && (
-            <div className="flex justify-start">
-              <div className="bg-card text-card-foreground border p-3 rounded-2xl">
-                <div className="animate-pulse">Thinking...</div>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Input */}
-        <div className="flex gap-2 p-3 border-t">
-          <Input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyPress={(e) => e.key === 'Enter' && !isLoading && handleSend()}
-            placeholder="Type your response..."
-            className="flex-1"
-            disabled={isLoading}
-          />
-          <Button onClick={handleSend} disabled={!input.trim() || isLoading}>
-            Send
-          </Button>
-        </div>
+      <div className="flex gap-2">
+        <input className="flex-1 border rounded-xl px-3 py-2" value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' ? handleSend() : null} placeholder="Type your response…" />
+        <button className="px-4 py-2 rounded-xl bg-blue-600 text-white" onClick={handleSend}>Send</button>
       </div>
     </div>
-  )
+  );
 }
