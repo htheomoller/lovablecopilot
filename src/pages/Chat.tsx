@@ -13,13 +13,12 @@ interface Answers {
   answer_style?: 'eli5'|'intermediate'|'developer' 
 }
 
-const ORDER: (keyof Answers)[] = ['answer_style','idea','name','audience','features','privacy','auth','deep_work_hours'];
+const ORDER: (keyof Answers)[] = ['idea','name','audience','features','privacy','auth','deep_work_hours'];
 
 function nextQuestion(a: Answers): string {
-  if (!a.answer_style) return 'First, how should I talk to you? Say: ELI5 (very simple), Intermediate, or Developer.';
-  if (!a.idea) return 'Now, what\'s your app idea in one short line?';
+  if (!a.idea) return 'What\'s your app idea in one short line?';
   if (!a.name) return 'Do you have a name? If not, say "invent one" or type a short name (e.g. PhotoFix).';
-  if (!a.audience) return 'Who is it for (your ideal customer/user)?';
+  if (!a.audience) return 'Who is it for (your ideal customer/user)?';  
   if (!a.features || a.features.length === 0) return 'List top 2–3 must‑have features (comma separated).';
   if (!a.privacy) return 'Data visibility: Private, Share via link, or Public?';
   if (!a.auth) return 'Sign‑in: Google OAuth, Magic email link, or None (dev only)?';
@@ -61,7 +60,7 @@ export default function Chat() {
     
     // If no saved messages, start with greeting
     if (!hasMessages) {
-      const greeting = "Hi — let's get your idea moving! I'll ask you a few quick questions, keep notes, and when I have enough I'll propose a roadmap. You can jump in with questions anytime.\n\n" + nextQuestion({});
+      const greeting = "Hi — let's get started building your idea! I'll ask you a few quick questions so I can understand what you want to make. Once I have enough, I'll build a roadmap for you. Anytime you're unsure, just ask me.\n\nTo start, how should I talk to you? Say: ELI5 (very simple), Intermediate, or Developer.";
       const initialMessages: Msg[] = [{ role: 'assistant' as const, text: greeting, ts: Date.now() }];
       setMessages(initialMessages);
       try { localStorage.setItem('cp_messages_v1', JSON.stringify(initialMessages)); } catch {}
@@ -102,16 +101,15 @@ export default function Chat() {
         }
       }
 
-      // Handle roadmap trigger
-      if (nextQuestion(answers) === '' && /(^|\b)(yes|yeah|sure|ok|okay|generate|create|roadmap)(\b|$)/i.test(say)) {
-        const data = await callEdge(say, 'roadmap');
-        const reply = data?.reply ?? 'Generating your roadmap...';
+      // Handle roadmap trigger  
+      if (nextQuestion(answers) === '' && /(^|\b)(yes|yeah|sure|ok|okay|review|roadmap)(\b|$)/i.test(say)) {
+        const reply = 'Great! Let me build your roadmap now...';
         persistMessages([...newMessages, { role: 'assistant' as const, text: reply, ts: Date.now() }]);
         setBusy(false);
         return;
       }
 
-      // Regular NLU processing
+      // Send to OpenAI NLU
       const data = await callEdge(say, 'nlu');
       let reply = data?.reply ?? 'No reply.';
       
@@ -128,7 +126,7 @@ export default function Chat() {
         if (q) {
           reply += `\n\n${q}`;
         } else {
-          reply += `\n\nI've got everything I need. Would you like me to generate your roadmap now?`;
+          reply += `\n\nGreat — I have everything I need. Would you like to review your roadmap now?`;
         }
       }
       
@@ -159,7 +157,7 @@ export default function Chat() {
           localStorage.removeItem('cp_messages_v1');
           localStorage.removeItem('cp_ans_v1');
           window.location.reload();
-        }}>Refresh</button>
+        }}>Reset</button>
         <button className="px-2 py-1 text-sm rounded bg-secondary" onClick={ping}>Ping Edge</button>
       </div>
 
