@@ -97,7 +97,19 @@ export default function Chat() {
           const reflect = addMessage('assistant', `Got it: **${nluData.field}** → "${nluData.value}". ${nextQuestion(updated) || 'If everything looks right, say: generate roadmap.'}`)
           setSession(reflect)
         } else {
-          const fallback = addMessage('assistant', nluData.reply || 'Thanks — could you rephrase that in one short line?')
+          // Friendlier, contextual clarification with example based on the next required field
+          const next = nextQuestion(session);
+          const examples: Record<string, string> = {
+            "Tell me your app idea in one short line (what it does).": 'e.g., "AI photo restoration for old family pictures."',
+            "Do you have a name? If not, say 'invent one'.": 'e.g., "RetroFix" or "invent one".',
+            "Who is it for (ideal user)?": 'e.g., "Families with old albums"',
+            "List top 2–3 must-have features (comma separated).": 'e.g., "upload, scratch removal, colorize"',
+            "Data visibility: Private, Share via link, or Public?": "Reply with: Private / Share via link / Public",
+            "Sign-in: Google OAuth, Magic email link, or None (dev only)?": "Reply with: Google OAuth / Magic email link / None",
+            "Daily focused work hours: 0.5, 1, 2, or 4+?": "Reply with: 0.5 / 1 / 2 / 4+"
+          };
+          const tip = next ? `\n\nExample: ${examples[next] || ""}` : "";
+          const fallback = addMessage('assistant', (nluData.reply || "Got it, could you phrase that more clearly?") + tip)
           setSession(fallback)
         }
         setIsLoading(false)
@@ -265,50 +277,51 @@ export default function Chat() {
         </div>
       </div>
 
-      {/* Messages Container */}
-      <div className="flex-1 overflow-y-auto space-y-4 mb-4 p-4 border rounded-lg bg-muted/30">
-        {session.messages.map((message, i) => (
-          <div
-            key={i}
-            className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
-          >
-            <div
-              className={`max-w-[80%] p-3 rounded-lg ${
-                message.role === 'user'
-                  ? 'bg-primary text-primary-foreground ml-4'
-                  : 'bg-card text-card-foreground mr-4 border'
-              }`}
-            >
-              <div className="whitespace-pre-wrap">{message.text}</div>
-              <div className="text-xs opacity-70 mt-1">
-                {new Date(message.ts).toLocaleTimeString()}
+      <div className="flex flex-col h-full">
+        {/* Captured summary */}
+        <div className="flex flex-wrap gap-2 p-3 border-b bg-muted/30 text-xs">
+          {['idea','name','audience','features','privacy','auth','deep_work_hours'].map(key => (
+            session.answers?.[key] ? (
+              <span key={key} className="rounded-full bg-secondary px-2 py-1 text-secondary-foreground">
+                {key}: {Array.isArray(session.answers[key]) ? session.answers[key].join(', ') : session.answers[key]}
+              </span>
+            ) : null
+          ))}
+        </div>
+
+        {/* Messages */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          {session.messages.map((msg, i) => (
+            <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div className={`max-w-[80%] rounded-2xl px-3 py-2 shadow-sm whitespace-pre-wrap ${msg.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-card border'}`}>
+                {msg.text}
               </div>
             </div>
-          </div>
-        ))}
-        
-        {isLoading && (
-          <div className="flex justify-start">
-            <div className="bg-card text-card-foreground mr-4 border p-3 rounded-lg">
-              <div className="animate-pulse">Thinking...</div>
+          ))}
+          
+          {isLoading && (
+            <div className="flex justify-start">
+              <div className="bg-card text-card-foreground border p-3 rounded-2xl">
+                <div className="animate-pulse">Thinking...</div>
+              </div>
             </div>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
 
-      {/* Input */}
-      <div className="flex gap-2">
-        <Input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyPress={(e) => e.key === 'Enter' && !isLoading && handleSend()}
-          placeholder="Type your message..."
-          className="flex-1"
-          disabled={isLoading}
-        />
-        <Button onClick={handleSend} disabled={!input.trim() || isLoading}>
-          Send
-        </Button>
+        {/* Input */}
+        <div className="flex gap-2 p-3 border-t">
+          <Input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyPress={(e) => e.key === 'Enter' && !isLoading && handleSend()}
+            placeholder="Type your response..."
+            className="flex-1"
+            disabled={isLoading}
+          />
+          <Button onClick={handleSend} disabled={!input.trim() || isLoading}>
+            Send
+          </Button>
+        </div>
       </div>
     </div>
   )
