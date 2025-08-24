@@ -1,139 +1,128 @@
 import React, { useEffect, useState } from 'react';
-import { defaultSession, loadSession, saveSession, clearSession, append, nextQuestion, type ChatMsg, type ChatSession, type AnswerStyle } from '@/lib/chatWizard';
+import { callEdge } from '@/lib/ai';
 
-async function callEdge(body: any) {
-  const r = await fetch('/functions/v1/ai-generate', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
-  const ct = r.headers.get('content-type') || '';
-  if (!ct.includes('application/json')) throw new Error('Non-JSON response from edge');
-  return await r.json();
-}
+interface ChatMsg { role: 'user'|'assistant'; text: string; ts: number }
+
+const LS_KEY_MSGS = 'cp_chat_msgs_v1';
+const LS_KEY_ANS  = 'cp_chat_answers_v1';
 
 export default function Chat() {
-  const [session, setSession] = useState<ChatSession>(loadSession());
+  const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  const [answers, setAnswers] = useState<Record<string, any>>({});
 
-  // greet once
+  // Load once
   useEffect(() => {
-    if (session.messages.length === 0) {
-      let s = append(session, { role: 'assistant', ts: Date.now(), text: "Hi — let's get your idea moving! I'll ask a few quick questions, keep notes for you, and when I have enough, I'll propose a roadmap. You can jump in with questions anytime.\n\nHow should I talk to you today? Say: ELI5 (very simple), Intermediate, or Developer." });
-      setSession(s);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    try {
+      const m = JSON.parse(localStorage.getItem(LS_KEY_MSGS) || 'null');
+      const a = JSON.parse(localStorage.getItem(LS_KEY_ANS)  || 'null');
+      if (Array.isArray(m) && m.length) setMessages(m);
+      else setMessages([{ role:'assistant', text:"Hi — let's get your idea moving! I'll ask a few quick questions, keep notes for you, and when I have enough, I'll propose a roadmap. You can jump in with questions anytime.\n\nHow should I talk to you today? Say: ELI5 (very simple), Intermediate, or Developer.", ts: Date.now() }]);
+      if (a && typeof a === 'object') setAnswers(a);
+    } catch {}
   }, []);
 
-  const push = (m: ChatMsg) => { const ns = append(session, m); setSession(ns); };
-
-  const setStyleFromText = (say: string): AnswerStyle | null => {
-    const s = say.trim().toLowerCase();
-    if (/(^|\b)eli\s*5(\b|$)|\beli5\b|very simple|simple|not technical|scared/.test(s)) return 'eli5';
-    if (/(^|\b)intermediate(\b|$)|some technical|a bit technical/.test(s)) return 'intermediate';
-    if (/(^|\b)developer(\b|$)|tech|very technical|full detail/.test(s)) return 'developer';
-    return null;
-  };
+  // Persist after each change
+  useEffect(() => {
+    try { localStorage.setItem(LS_KEY_MSGS, JSON.stringify(messages)); } catch {}
+  }, [messages]);
+  useEffect(() => {
+    try { localStorage.setItem(LS_KEY_ANS, JSON.stringify(answers)); } catch {}
+  }, [answers]);
 
   async function send() {
-    const say = input.trim(); if (!say) return; setInput('');
-    push({ role: 'user', text: say, ts: Date.now() });
+    const say = input.trim();
+    if (!say) return;
+    setInput('');
+    setMessages(m => [...m, { role:'user', text: say, ts: Date.now() }]);
 
-    // 1) Style detection first (natural phrases allowed)
-    const maybe = setStyleFromText(say);
-    if (maybe) {
-      const ns = { ...session, style: maybe };
-      saveSession(ns); setSession(ns);
-      push({ role: 'assistant', ts: Date.now(), text: `Got it — I'll keep it ${maybe === 'eli5' ? 'super simple (ELI5)' : maybe}. ${nextQuestion(ns.answers)}` });
+    // style quick-pick
+    if (/^(eli5|intermediate|developer)$/i.test(say)) {
+      const picked = say.toLowerCase();
+      setMessages(m => [...m, { role:'assistant', text: `Got it — I'll keep it ${picked === 'eli5' ? 'super simple (ELI5)' : picked}. What's your app idea in one short line?`, ts: Date.now() }]);
       return;
     }
 
-    // 2) If we still need onboarding fields, use LLM‑NLU
-    const need = nextQuestion(session.answers);
-    if (need) {
-      try {
-        setBusy(true);
-        const resp = await callEdge({ mode: 'nlu', answer_style: session.style, prompt: say });
-        if (resp?.field && typeof resp.value !== 'undefined') {
-          const answers = { ...session.answers } as any; answers[resp.field] = resp.value;
-          const ns: ChatSession = { ...session, answers };
-          saveSession(ns); setSession(ns);
-          // reflect + next question
-          push({ role: 'assistant', ts: Date.now(), text: resp.reply || `Got it: **${resp.field}**.` });
-          const nq = nextQuestion(answers);
-          push({ role: 'assistant', ts: Date.now(), text: nq || "Nice — I have what I need. Want me to draft a roadmap now? (say: generate roadmap)" });
-        } else {
-          push({ role: 'assistant', ts: Date.now(), text: resp?.reply || 'Thanks — could you say that in one short line?' });
-        }
-      } catch (e: any) {
-        push({ role: 'assistant', ts: Date.now(), text: `Error talking to NLU: ${e?.message || e}` });
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
+    // If we still need required fields → call NLU
+    const required = ['idea','name','audience','features','privacy','auth','deep_work_hours'];
+    const missing = required.find(k => {
+      const v = (answers as any)[k];
+      return v == null || (Array.isArray(v) && v.length === 0);
+    });
 
-    // 3) Explicit roadmap trigger
-    if (/^generate\s+roadmap$/i.test(say)) {
-      try {
-        setBusy(true);
-        const resp = await callEdge({ mode: 'roadmap', answer_style: session.style, answers: session.answers });
-        push({ role: 'assistant', ts: Date.now(), text: resp?.reply || 'Roadmap ready.' });
-        if (Array.isArray(resp?.milestones) && resp.milestones.length) {
-          push({ role: 'assistant', ts: Date.now(), text: 'I included a milestones JSON block — check the Roadmap tab.' });
-        }
-      } catch (e: any) {
-        push({ role: 'assistant', ts: Date.now(), text: `Error generating roadmap: ${e?.message || e}` });
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
-
-    // 4) Otherwise: light small‑talk via chat mode
+    setBusy(true);
     try {
-      setBusy(true);
-      const resp = await callEdge({ mode: 'chat', answer_style: session.style, prompt: say });
-      push({ role: 'assistant', ts: Date.now(), text: resp?.reply || '👍' });
-    } catch (e: any) {
-      push({ role: 'assistant', ts: Date.now(), text: `Error: ${e?.message || e}` });
+      const data = await callEdge(say, 'nlu');
+      if (data?.reply) {
+        setMessages(m => [...m, { role:'assistant', text: data.reply, ts: Date.now() }]);
+      }
+      if (data?.field) {
+        setAnswers(prev => ({ ...prev, [data.field]: data.value }));
+        // Ask next question, or close the loop
+        const a2 = { ...answers, [data.field]: data.value } as any;
+        const nextKey = required.find(k => {
+          const v = a2[k];
+          return v == null || (Array.isArray(v) && v.length === 0);
+        });
+        if (nextKey) {
+          const qMap: Record<string,string> = {
+            idea: "What's your app idea in one short line?",
+            name: "Do you have a name? If not, say 'invent one' or type a short name (e.g. PhotoFix).",
+            audience: "Who is it for (your ideal user/customer)?",
+            features: "List top 2–3 must‑have features (comma separated).",
+            privacy: "Data visibility: Private, Share via link, or Public?",
+            auth: "Sign‑in: Google OAuth, Magic email link, or None (dev only)?",
+            deep_work_hours: "Daily focused work hours: 0.5, 1, 2, or 4+?"
+          };
+          setMessages(m => [...m, { role:'assistant', text: qMap[nextKey], ts: Date.now() }]);
+        } else {
+          setMessages(m => [...m, { role:'assistant', text: "Nice — I have what I need. Want me to draft a roadmap now? (say: generate roadmap)", ts: Date.now() }]);
+        }
+      }
+    } catch (err: any) {
+      setMessages(m => [...m, { role:'assistant', text: `Error: ${err?.message || 'edge call failed'}`, ts: Date.now() }]);
     } finally {
       setBusy(false);
     }
   }
 
   function resetAll() {
-    clearSession();
-    const fresh = defaultSession();
-    setSession(fresh);
-    setTimeout(() => {
-      setSession(append(fresh, { role: 'assistant', ts: Date.now(), text: "Hi — let's get your idea moving! I'll ask a few quick questions, keep notes for you, and when I have enough, I'll propose a roadmap. You can jump in with questions anytime.\n\nHow should I talk to you today? Say: ELI5 (very simple), Intermediate, or Developer." }));
-    }, 0);
+    try { localStorage.removeItem(LS_KEY_MSGS); localStorage.removeItem(LS_KEY_ANS); } catch {}
+    setAnswers({});
+    setMessages([{ role:'assistant', text:"Hi — let's get your idea moving! I'll ask a few quick questions, keep notes for you, and when I have enough, I'll propose a roadmap. You can jump in with questions anytime.\n\nHow should I talk to you today? Say: ELI5 (very simple), Intermediate, or Developer.", ts: Date.now() }]);
   }
 
   return (
-    <div className="max-w-3xl mx-auto p-4 space-y-3">
+    <div className="max-w-3xl mx-auto p-4 space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">Chat with Copilot</h1>
         <div className="flex gap-2">
-          <button onClick={() => window.location.reload()} className="px-3 py-1 bg-secondary rounded">Refresh</button>
-          <button onClick={resetAll} className="px-3 py-1 bg-destructive text-destructive-foreground rounded">Reset</button>
+          <button className="px-3 py-1 rounded border" onClick={() => window.location.reload()}>Refresh</button>
+          <button className="px-3 py-1 rounded border" onClick={resetAll}>Reset</button>
         </div>
       </div>
 
       <div className="space-y-2">
-        {session.messages.map((m, i) => (
+        {messages.map((m,i) => (
           <div key={i} className={m.role === 'user' ? 'text-right' : 'text-left'}>
-            <div className={`inline-block px-3 py-2 rounded ${m.role==='user' ? 'bg-primary text-primary-foreground' : 'bg-muted'}`}>{m.text}</div>
+            <div className={`inline-block px-3 py-2 rounded ${m.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-muted'}`}>
+              {m.text}
+            </div>
           </div>
         ))}
-        {busy && <div className="text-sm opacity-70">…thinking</div>}
+        {busy && <div className="text-sm text-muted-foreground">…thinking</div>}
       </div>
 
       <div className="flex gap-2">
-        <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=> e.key==='Enter' ? send() : undefined} placeholder="Type here…" className="flex-1 px-3 py-2 border rounded"/>
-        <button onClick={send} className="px-4 py-2 bg-primary text-primary-foreground rounded">Send</button>
+        <input
+          value={input}
+          onChange={e=>setInput(e.target.value)}
+          onKeyDown={e=> e.key === 'Enter' ? send() : undefined}
+          placeholder="Type your message…"
+          className="flex-1 px-3 py-2 border rounded"
+        />
+        <button className="px-3 py-2 rounded bg-primary text-primary-foreground" onClick={send}>Send</button>
       </div>
     </div>
   );
