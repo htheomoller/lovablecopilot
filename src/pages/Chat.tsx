@@ -1,170 +1,114 @@
-import { useEffect, useState } from "react";
-import { aiPing, aiChat, aiExtract, aiRoadmap } from "@/lib/ai";
-import { Answers, mergeExtract, nextMissing, reflectPromptFor } from "@/lib/onboarding";
+import React, { useEffect, useRef, useState } from "react";
+import { chatEdge, pingEdge, EDGE_ENDPOINT } from "@/lib/ai";
 
-type Msg = { role: "assistant" | "user" | "system", text: string, ts: number };
+type Msg = { role: "assistant" | "user" | "system"; text: string; ts: number };
 
-const GREETING = `Hi — let's get started building your idea! I'm wired to an edge function. You can test it with the Ping Edge button. How should I talk to you? Say: Explain like I'm 5 (very simple), Intermediate, or Developer.`;
+const LS_KEY = "cp_chat_messages_v1";
 
-const KEY = "cp_chat_session_v2";
-
-type Session = {
-  messages: Msg[];
-  answers: Answers;
-  style: "eli5" | "intermediate" | "developer";
-};
-
-function load(): Session {
+function loadMessages(): Msg[] {
   try {
-    const j = localStorage.getItem(KEY);
-    if (j) return JSON.parse(j) as Session;
-  } catch {}
-  return {
-    messages: [{ role: "assistant", text: GREETING, ts: Date.now() }],
-    answers: {},
-    style: "eli5",
-  };
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
 }
 
-function save(s: Session) {
-  try { localStorage.setItem(KEY, JSON.stringify(s)); } catch {}
+function saveMessages(msgs: Msg[]) {
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify(msgs));
+  } catch {}
 }
 
 export default function Chat() {
-  const [s, setS] = useState(load());
+  const [messages, setMessages] = useState<Msg[]>(() => {
+    const prior = loadMessages();
+    if (prior.length) return prior;
+    return [
+      {
+        role: "assistant",
+        ts: Date.now(),
+        text:
+          "Hi — let's get started building your idea! I'm wired to an edge function. You can test it with the Ping Edge button. " +
+          "How should I talk to you? Say: Explain like I'm 5 (very simple), Intermediate, or Developer.",
+      },
+    ];
+  });
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
-  useEffect(() => { save(s); }, [s]);
+  useEffect(() => {
+    saveMessages(messages);
+  }, [messages]);
 
-  async function pingEdge() {
+  async function onPing() {
     try {
-      const r = await aiPing();
-      push({ role: "system", text: `Endpoint OK → ${r.json?.reply}`, ts: Date.now() });
-    } catch (e: any) {
-      push({ role: "system", text: `Ping error: ${e?.message || e}`, ts: Date.now() });
+      const r = await pingEdge();
+      setMessages((m) => [
+        ...m,
+        {
+          role: "assistant",
+          ts: Date.now(),
+          text: `Endpoint: ${EDGE_ENDPOINT}\nPing → ${JSON.stringify(r)}`,
+        },
+      ]);
+    } catch (err: any) {
+      setMessages((m) => [
+        ...m,
+        { role: "assistant", ts: Date.now(), text: `Ping error: ${String(err?.message || err)}` },
+      ]);
     }
   }
 
-  function push(m: Msg) {
-    setS((prev) => ({ ...prev, messages: [...prev.messages, m] }));
+  function onRefresh() {
+    // Keep it a true refresh; some frameworks swallow a plain button without type
+    window.location.reload();
   }
 
-  function reset() {
-    const fresh = load(); // resets to greeting
-    setS(fresh);
+  function onReset() {
+    // Do NOT reload. Clear state and storage so the UI is predictable.
+    localStorage.removeItem(LS_KEY);
+    setMessages([
+      {
+        role: "assistant",
+        ts: Date.now(),
+        text:
+          "Hi — let's get started building your idea! I'm wired to an edge function. You can test it with the Ping Edge button. " +
+          "How should I talk to you? Say: Explain like I'm 5 (very simple), Intermediate, or Developer.",
+      },
+    ]);
+    setInput("");
+    inputRef.current?.focus();
   }
 
-  async function handleSend() {
+  async function send() {
     const say = input.trim();
     if (!say) return;
     setInput("");
-    push({ role: "user", text: say, ts: Date.now() });
+    setMessages((m) => [...m, { role: "user", ts: Date.now(), text: say }]);
 
-    // Enhanced style detection with natural language patterns
-    const STYLE_PATTERNS = {
-      eli5: /(\beli5\b|explain\s+like\s+i'?m\s*5|explain\s+like\s+i\s*am\s*5|very\s+simple\b|\bsimple\b)/i,
-      intermediate: /(\bintermediate\b|somewhat\s+technical|not\s+too\s+technical|medium\b)/i,
-      developer: /(\bdeveloper\b|\bdev\b|very\s+technical|advanced\b)/i,
-    };
-    
-    const styleDisplay = (s: 'eli5'|'intermediate'|'developer') => (
-      s === 'eli5' ? "Explain like I'm 5 (very simple)" : s === 'intermediate' ? 'Intermediate' : 'Developer'
-    );
-    
-    const pickStyleFrom = (text: string): ('eli5'|'intermediate'|'developer'|null) => {
-      if (STYLE_PATTERNS.eli5.test(text)) return 'eli5';
-      if (STYLE_PATTERNS.intermediate.test(text)) return 'intermediate';
-      if (STYLE_PATTERNS.developer.test(text)) return 'developer';
-      return null;
-    };
-
-    const pickedStyle = pickStyleFrom(say);
-    if (pickedStyle) {
-      setS((prev) => ({ ...prev, style: pickedStyle }));
-      push({ role: "assistant", text: `Great — I'll use ${styleDisplay(pickedStyle)}. What's your app idea in one short line?`, ts: Date.now() });
-      return;
-    }
-
-    // If we are missing a field → extract
-    const missing = nextMissing(s.answers);
-    if (missing) {
-      setBusy(true);
-      try {
-        const r = await aiExtract(say);
-        const fields = (r?.json?.fields ?? {}) as Partial<Answers>;
-        const merged = mergeExtract(s.answers, fields);
-        setS((prev) => ({ ...prev, answers: merged }));
-        // reflect
-        const reflect: string[] = [];
-        for (const k of Object.keys(fields) as (keyof Answers)[]) {
-          const v = (fields as any)[k];
-          if (v == null) continue;
-          const val = Array.isArray(v) ? v.join(", ") : String(v);
-          reflect.push(`**${k}** → "${val}"`);
-        }
-        if (reflect.length) {
-          push({ role: "assistant", text: `Noted: ${reflect.join("; ")}.`, ts: Date.now() });
-        } else {
-          // fallback small talk
-          const chat = await aiChat(say);
-          push({ role: "assistant", text: chat?.json?.reply || "Thanks — tell me more.", ts: Date.now() });
-        }
-        // ask next
-        const nextKey = nextMissing(merged);
-        if (nextKey) {
-          push({ role: "assistant", text: reflectPromptFor(nextKey)!, ts: Date.now() });
-        } else {
-          // all captured → present summary
-          const a = merged;
-          const summary = [
-            `Idea: ${a.idea || "-"}`,
-            `Name: ${a.name || "-"}`,
-            `Audience: ${a.audience || "-"}`,
-            `Features: ${(a.features || []).join(", ") || "-"}`,
-            `Privacy: ${a.privacy || "-"}`,
-            `Auth: ${a.auth || "-"}`,
-            `Daily hours: ${a.deep_work_hours || "-"}`,
-          ].join("\n");
-          push({ role: "assistant", text: `Great — I have everything. Please review:\n${summary}\n\nIf you're ready, say "generate roadmap".`, ts: Date.now() });
-        }
-      } catch (e: any) {
-        push({ role: "assistant", text: `Error talking to AI: ${e?.message || e}`, ts: Date.now() });
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
-
-    // If user says generate roadmap
-    if (/^generate\s+roadmap$/i.test(say)) {
-      setBusy(true);
-      try {
-        const r = await aiRoadmap(s.answers);
-        const roadmap = r?.json?.roadmap;
-        if (roadmap?.summary) {
-          push({ role: "assistant", text: roadmap.summary, ts: Date.now() });
-        }
-        if (Array.isArray(roadmap?.milestones)) {
-          const list = roadmap.milestones.map((m: any, i: number) => `${i + 1}. ${m.name} (${m.duration_days}d) — ${m.description}`).join("\n");
-          push({ role: "assistant", text: `Proposed milestones:\n${list}\n\nApprove? Say "looks good" or tell me what to change.`, ts: Date.now() });
-        } else {
-          push({ role: "assistant", text: "I drafted a roadmap. Tell me if you'd like tweaks.", ts: Date.now() });
-        }
-      } catch (e: any) {
-        push({ role: "assistant", text: `Error generating roadmap: ${e?.message || e}`, ts: Date.now() });
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
-
-    // Otherwise, general chat
     try {
-      const r = await aiChat(say);
-      push({ role: "assistant", text: r?.json?.reply || "👍", ts: Date.now() });
-    } catch (e: any) {
-      push({ role: "assistant", text: `Error talking to AI: ${e?.message || e}`, ts: Date.now() });
+      setBusy(true);
+      // IMPORTANT: only "chat" mode. No NLU calls.
+      const r = await chatEdge(say);
+      const reply =
+        (r as any)?.reply ??
+        (typeof r === "object" ? JSON.stringify(r) : "No reply from edge.");
+      setMessages((m) => [...m, { role: "assistant", ts: Date.now(), text: String(reply) }]);
+    } catch (err: any) {
+      setMessages((m) => [
+        ...m,
+        {
+          role: "assistant",
+          ts: Date.now(),
+          text: `Error talking to edge: ${String(err?.message || err)}`,
+        },
+      ]);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -172,32 +116,47 @@ export default function Chat() {
     <div className="max-w-3xl mx-auto p-4 space-y-4">
       <div className="flex items-center gap-2">
         <h1 className="text-xl font-semibold">Chat with Copilot</h1>
-        <button className="px-2 py-1 rounded bg-neutral-200 hover:bg-neutral-300" onClick={() => location.reload()}>Refresh</button>
-        <button className="px-2 py-1 rounded bg-neutral-200 hover:bg-neutral-300" onClick={reset}>Reset</button>
-        <button className="px-2 py-1 rounded bg-neutral-200 hover:bg-neutral-300" onClick={pingEdge}>Ping Edge</button>
+        <button onClick={onRefresh} className="px-2 py-1 border rounded">
+          Refresh
+        </button>
+        <button onClick={onReset} className="px-2 py-1 border rounded">
+          Reset
+        </button>
+        <button onClick={onPing} className="px-2 py-1 border rounded">
+          Ping Edge
+        </button>
       </div>
 
-      <div className="border rounded p-3 space-y-2 bg-white">
-        {s.messages.map((m, i) => (
-          <div key={i} className={m.role === "user" ? "text-right" : "text-left"}>
-            <div className={m.role === "user" ? "inline-block rounded px-3 py-2 bg-blue-50" : "inline-block rounded px-3 py-2 bg-neutral-100"}>
-              {m.text}
-            </div>
+      <div className="space-y-2 border rounded p-3">
+        {messages.map((m, i) => (
+          <div
+            key={i}
+            className={
+              m.role === "user"
+                ? "bg-blue-50 border border-blue-200 rounded px-3 py-2 inline-block"
+                : "bg-gray-100 border border-gray-200 rounded px-3 py-2 inline-block"
+            }
+          >
+            {m.text}
           </div>
         ))}
-        {busy && <div className="text-sm text-neutral-500 italic">…thinking</div>}
+        {busy && <div className="text-sm text-gray-500">…thinking</div>}
       </div>
 
       <div className="flex gap-2">
         <input
-          className="flex-1 px-3 py-2 border rounded"
-          placeholder="Type your message…"
+          ref={inputRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => (e.key === "Enter" ? handleSend() : undefined)}
+          onKeyDown={(e) => (e.key === "Enter" ? send() : undefined)}
+          placeholder="Type your message…"
+          className="flex-1 px-3 py-2 border rounded"
         />
-        <button className="px-3 py-2 rounded bg-black text-white" onClick={handleSend}>Send</button>
+        <button onClick={send} className="px-3 py-2 border rounded">
+          Send
+        </button>
       </div>
+      <p className="text-xs text-gray-500">Endpoint: {EDGE_ENDPOINT}</p>
     </div>
   );
 }
