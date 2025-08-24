@@ -1,6 +1,8 @@
-# Ensure functions are discoverable & JWT off for public invoke (we rely on anon key header)
-[functions]
-[functions.hello]
-verify_jwt = false
+[project]
+id = "yjfqfnmrsdfbvlyursdi"
+
 [functions.ai-generate]
+verify_jwt = false
+
+[functions.hello]
 verify_jwt = false

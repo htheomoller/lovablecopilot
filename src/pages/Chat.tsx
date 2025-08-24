@@ -1,91 +1,92 @@
-import React, { useEffect, useState } from "react";
-import { pingEdge, pingHello, callNlu, callChat } from "@/lib/ai";
+import React, { useEffect, useState } from 'react';
+import { callEdge, pingEdge, currentAiEndpoint } from '@/lib/ai';
 
-type ChatMsg = { role: "user"|"assistant"|"system"; text: string; ts: number };
+type Msg = { role: 'user' | 'assistant' | 'system'; text: string; ts: number };
 
 export default function Chat() {
-  const [messages, setMessages] = useState<ChatMsg[]>([]);
-  const [input, setInput] = useState("");
+  const [messages, setMessages] = useState<Msg[]>([]);
+  const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
-  const [diag, setDiag] = useState<string>("");
+  const [endpoint, setEndpoint] = useState(currentAiEndpoint());
+  const [lastPing, setLastPing] = useState('');
 
   useEffect(() => {
-    setMessages([
-      { role: "assistant", ts: Date.now(),
-        text: "Hi — let's get started building your idea! I'm wired to an edge function. You can test it with the Ping Edge button. How should I talk to you? Say: ELI5 (very simple), Intermediate, or Developer." }
-    ]);
+    setMessages([{
+      role: 'assistant',
+      text: `Hi — let's get started building your idea! I'm wired to an edge function. You can test it with the Ping Edge button. How should I talk to you? Say: ELI5 (very simple), Intermediate, or Developer.`,
+      ts: Date.now()
+    }]);
   }, []);
 
   async function doPing() {
-    setDiag("Pinging ai-generate…");
-    const a = await pingEdge();
-    if (!a.ok) {
-      setDiag(`ai-generate failed: ${a.error ?? a.status}. raw: ${a.raw ?? ""}. Trying /hello…`);
-      const h = await pingHello();
-      setDiag(`hello → ok:${h.ok} status:${h.status} raw:${h.raw ?? ""}`);
-      return;
+    setLastPing('…pinging');
+    try {
+      const r = await pingEdge(); // expects { success:true, mode:'ping', reply:'pong' }
+      setLastPing(`ai-generate → ok:true status:200 reply:${JSON.stringify(r)}`);
+    } catch (e: any) {
+      setLastPing(`Ping error: ${e.message || String(e)}`);
     }
-    setDiag(`ai-generate → ok:${a.ok} status:${a.status} raw:${a.raw ?? ""}`);
   }
 
   async function send() {
     const say = input.trim();
     if (!say) return;
-    setInput("");
-    setMessages(m => [...m, { role:"user", ts: Date.now(), text: say }]);
+    setInput('');
+    setMessages(m => [...m, { role:'user', text: say, ts: Date.now() }]);
 
-    // quick style select
+    // quick style capture locally; no NLU required to avoid misfires
     if (/^(eli5|intermediate|developer)$/i.test(say)) {
-      const picked = say.toUpperCase();
-      setMessages(m => [...m, { role:"assistant", ts: Date.now(), text: `Got it — I'll keep it ${picked === "ELI5" ? "very simple" : picked.toLowerCase()}. What's your app idea in one short line?` }]);
+      const mode = say.toUpperCase();
+      setMessages(m => [...m, { role:'assistant', text:`Got it — I'll keep it ${mode === 'ELI5' ? 'very simple' : mode === 'INTERMEDIATE' ? 'at an intermediate level' : 'developer-focused'}. What's your app idea in one short line?`, ts: Date.now() }]);
       return;
     }
 
-    setBusy(true);
-    // Try NLU mode first; if edge isn't deployed we'll surface a clear error.
-    const n = await callNlu(say);
-    if (n.ok && n.json) {
-      const reply = n.json.reply ?? "OK.";
-      setMessages(m => [...m, { role:"assistant", ts: Date.now(), text: reply }]);
-    } else {
-      const err = n.error ? `${n.error}${n.raw ? `: ${n.raw}` : ""}` : `status ${n.status}`;
-      setMessages(m => [...m, { role:"assistant", ts: Date.now(), text: `Error talking to edge: ${err}` }]);
+    try {
+      setBusy(true);
+      // Basic chat pass-through; the edge function can be expanded later
+      const data = await callEdge({ mode: 'chat', prompt: say });
+      const reply = data?.reply ?? data?.generatedText ?? '👍';
+      setMessages(m => [...m, { role:'assistant', text: reply, ts: Date.now() }]);
+    } catch (err: any) {
+      setMessages(m => [...m, { role:'assistant', text: `Error talking to edge: ${err?.message || String(err)}`, ts: Date.now() }]);
+    } finally {
+      setBusy(false);
     }
-    setBusy(false);
   }
 
   return (
-    <div className="max-w-3xl mx-auto p-4 space-y-3">
+    <div className="max-w-3xl mx-auto p-4 space-y-4">
       <div className="flex items-center gap-2">
         <h1 className="text-xl font-semibold">Chat with Copilot</h1>
-        <button className="px-2 py-1 rounded border" onClick={() => window.location.reload()}>Refresh</button>
-        <button className="px-2 py-1 rounded border" onClick={doPing}>Ping Edge</button>
+        <button onClick={() => window.location.reload()} className="px-3 py-1 rounded border">Refresh</button>
+        <button onClick={doPing} className="px-3 py-1 rounded border">Ping Edge</button>
       </div>
 
-      {diag && (
-        <pre className="text-xs p-2 bg-muted rounded overflow-x-auto">{diag}</pre>
-      )}
+      <div className="text-xs text-muted-foreground">
+        Endpoint: <code>{endpoint}</code>
+      </div>
+      {lastPing && <div className="text-xs"><code>{lastPing}</code></div>}
 
-      <div className="space-y-2">
-        {messages.map((m,i) => (
-          <div key={i} className={m.role === "user" ? "text-right" : "text-left"}>
-            <div className={`inline-block px-3 py-2 rounded ${m.role==="user" ? "bg-primary text-primary-foreground" : "bg-secondary text-secondary-foreground"}`}>
+      <div className="space-y-2 border rounded p-3 bg-white">
+        {messages.map((m, i) => (
+          <div key={i} className={m.role === 'user' ? 'text-right' : ''}>
+            <div className={`inline-block px-3 py-2 rounded ${m.role==='user' ? 'bg-blue-50' : 'bg-gray-50'}`}>
               {m.text}
             </div>
           </div>
         ))}
-        {busy && <div className="text-sm opacity-70">…thinking</div>}
+        {busy && <div className="text-xs text-muted-foreground">…thinking</div>}
       </div>
 
       <div className="flex gap-2">
         <input
           value={input}
-          onChange={e=>setInput(e.target.value)}
-          onKeyDown={e=> e.key==="Enter" ? send() : undefined}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => e.key==='Enter' ? send() : undefined}
           placeholder="Type your message…"
           className="flex-1 px-3 py-2 border rounded"
         />
-        <button className="px-3 py-2 border rounded" onClick={send}>Send</button>
+        <button onClick={send} className="px-4 py-2 rounded bg-blue-600 text-white">Send</button>
       </div>
     </div>
   );
