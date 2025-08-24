@@ -1,25 +1,21 @@
-export type EdgeReply =
-  | { success: true; mode: string; reply: string }
-  | { success: false; error: string };
-
-const EDGE_PATH = "/functions/v1/ai-generate";
-
-export async function callEdge(payload: any): Promise<EdgeReply> {
-  const res = await fetch(EDGE_PATH, {
+export async function callEdge(prompt: string, mode: "chat" | "ping" = "chat") {
+  const url = "/functions/v1/ai-generate";
+  const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload ?? {}),
+    body: JSON.stringify({ mode, prompt })
   });
+
+  // If Supabase/Lovable returns HTML (404 proxy), surface a clear error
+  const ct = res.headers.get("content-type") || "";
   const text = await res.text();
+  if (!ct.includes("application/json")) {
+    const snippet = text.slice(0, 200);
+    throw new Error(`Non-JSON from edge (status ${res.status}): ${snippet}`);
+  }
   try {
     return JSON.parse(text);
   } catch {
-    throw new Error(`Non-JSON from edge (status ${res.status}): ${text.slice(0,120)}`);
+    throw new Error(`Malformed JSON from edge (status ${res.status}): ${text.slice(0, 200)}`);
   }
-}
-
-export async function pingEdge(): Promise<string> {
-  const out = await callEdge({ mode: "ping" });
-  if ((out as any).success) return (out as any).reply || "ok";
-  throw new Error((out as any).error || "unknown edge error");
 }

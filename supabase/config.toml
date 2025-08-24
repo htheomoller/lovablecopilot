@@ -1,4 +1,7 @@
 project_id = "yjfqfnmrsdfbvlyursdi"
 
+[functions]
+verify_jwt = false
+
 [functions.ai-generate]
 verify_jwt = false
