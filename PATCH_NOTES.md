@@ -1,5 +1,4 @@
-Reset edge baseline to eliminate 404s and non-JSON responses.
-- Created supabase/functions/ai-generate/index.ts that always returns JSON and handles CORS preflight first.
-- Added src/lib/ai.ts with strict JSON parsing and helpful error messages.
-- Updated Chat page to include a "Ping Edge" button that shows the raw JSON so we can verify the function is reachable.
-Next step after verification: layer in OpenAI + conversational onboarding.
+Fix edge 404s by forcing absolute Supabase invoke URLs from env in src/lib/ai.ts,
+adding robust JSON parsing and clear diagnostics, and exposing a "Ping Edge"
+button on Chat. Added a tiny /functions/hello for independent routing tests and
+ensured supabase/config.toml lists both functions with verify_jwt=false.
