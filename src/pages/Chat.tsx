@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { callEdge } from '@/lib/edge';
+import { callEdge } from '@/lib/ai';
 
 interface Msg { role: 'user'|'assistant'; text: string; ts: number }
 interface Answers { idea?: string; name?: string; audience?: string; features?: string[]; privacy?: string; auth?: string; deep_work_hours?: string; answer_style?: 'eli5'|'intermediate'|'developer' }

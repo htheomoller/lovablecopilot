@@ -1,20 +1,14 @@
-export type EdgeMode = 'chat'|'nlu';
-
-export async function callEdge(prompt: string, mode: EdgeMode = 'chat') {
-  const url = '/functions/v1/ai-nlu'; // Lovable/Supabase proxy
+export async function callEdge(prompt: string, mode: 'chat'|'nlu' = 'chat') {
+  const url = '/functions/v1/ai-generate'; // Supabase proxy path; works in Lovable preview
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ mode, prompt })
   });
-
-  // Harden against HTML / 404
-  const contentType = res.headers.get('content-type') || '';
-  if (!contentType.includes('application/json')) {
-    const text = await res.text();
-    throw new Error('Non-JSON response from edge' + (text ? `: ${String(text).slice(0,120)}` : ''));
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Non-JSON from edge (status ${res.status}):\n${text.slice(0,300)}`);
   }
-
-  const json = await res.json();
-  return json;
 }
