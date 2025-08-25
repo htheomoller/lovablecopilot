@@ -6,7 +6,8 @@ const EDGE = `${BASE}/functions/v1/ai-generate`;
 
 export async function callConversationAPI(
   message: string = "",
-  projectId?: string,
+  state?: string,
+  answers?: any,
   mode: "ping" | "chat" = "chat"
 ) {
   if (mode === "ping") {
@@ -24,9 +25,9 @@ export async function callConversationAPI(
     },
     body: JSON.stringify({ 
       mode, 
-      message, 
-      project_id: projectId,
-      client_time: new Date().toISOString()
+      message,
+      state,
+      answers
     }),
   });
 

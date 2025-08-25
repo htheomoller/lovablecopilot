@@ -9,29 +9,42 @@ export default function Chat() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [projectId, setProjectId] = useState<string>();
-  const [currentState, setCurrentState] = useState("ASK_TONE");
+  const [currentState, setCurrentState] = useState<string>("");
   const [answers, setAnswers] = useState<Record<string, any>>({});
-  const [blurbs, setBlurbs] = useState<Array<{ label: string; value: string }>>([]);
+  const [chips, setChips] = useState<string[]>([]);
 
   useEffect(() => {
-    const hello: Msg = {
-      role: "assistant",
-      ts: Date.now(),
-      text: "Hi! Let's build your idea together. I'll guide you through a few questions to understand your project better. How should I talk to you?",
-    };
-    setMessages([hello]);
-    
-    // Initialize with tone blurbs
-    setBlurbs([
-      { label: "Explain like I'm 5", value: "explain_like_im_5" },
-      { label: "Intermediate", value: "intermediate" },
-      { label: "Developer", value: "developer" }
-    ]);
+    // Load initial conversation state
+    loadInitialState();
   }, []);
+
+  async function loadInitialState() {
+    try {
+      const response = await callConversationAPI("");
+      if (response.success) {
+        const hello: Msg = {
+          role: "assistant",
+          ts: Date.now(),
+          text: response.prompt,
+        };
+        setMessages([hello]);
+        setCurrentState(response.state);
+        setAnswers(response.answers);
+        setChips(response.ui?.chips || []);
+      }
+    } catch (e: any) {
+      const hello: Msg = {
+        role: "assistant",
+        ts: Date.now(),
+        text: "Hi! Let's build your idea together. How should I talk to you?",
+      };
+      setMessages([hello]);
+    }
+  }
 
   async function onPing() {
     try {
-      const res = await callConversationAPI("", undefined, "ping");
+      const res = await callConversationAPI("", "", {}, "ping");
       setMessages(m => [...m, { role: "assistant", ts: Date.now(), text: `Ping → ${JSON.stringify(res)}` }]);
     } catch (e: any) {
       setMessages(m => [...m, { role: "assistant", ts: Date.now(), text: `Ping error: ${e.message}` }]);
@@ -47,17 +60,15 @@ export default function Chat() {
     setBusy(true);
     
     try {
-      const response = await callConversationAPI(say, projectId);
+      const response = await callConversationAPI(say, currentState, answers);
       
       if (response.success) {
-        setMessages(m => [...m, { role: "assistant", ts: Date.now(), text: response.reply }]);
+        setMessages(m => [...m, { role: "assistant", ts: Date.now(), text: response.prompt }]);
         
         // Update state
-        if (response.project_id) setProjectId(response.project_id);
-        if (response.state) setCurrentState(response.state);
-        if (response.answers) setAnswers(response.answers);
-        if (response.blurbs) setBlurbs(response.blurbs);
-        else setBlurbs([]);
+        setCurrentState(response.state);
+        setAnswers(response.answers);
+        setChips(response.ui?.chips || []);
       } else {
         throw new Error(response.error);
       }
@@ -69,7 +80,7 @@ export default function Chat() {
   }
 
   function handleChipClick(value: string) {
-    sendMessage(value.replace(/_/g, ' '));
+    sendMessage(value);
   }
 
   return (
@@ -86,9 +97,9 @@ export default function Chat() {
           onClick={() => {
             setMessages([]);
             setProjectId(undefined);
-            setCurrentState("ASK_TONE");
+            setCurrentState("");
             setAnswers({});
-            setBlurbs([]);
+            setChips([]);
             setTimeout(() => window.location.reload(), 20);
           }} 
           className="px-3 py-1 rounded border hover:bg-muted"
@@ -122,17 +133,17 @@ export default function Chat() {
       </div>
 
       {/* Quick chips */}
-      {blurbs.length > 0 && (
+      {chips.length > 0 && (
         <div className="space-y-2">
           <div className="text-sm text-muted-foreground">Quick options:</div>
           <div className="flex flex-wrap gap-2">
-            {blurbs.map((blurb) => (
+            {chips.map((chip, index) => (
               <Chip
-                key={blurb.value}
-                onClick={() => handleChipClick(blurb.value)}
+                key={index}
+                onClick={() => handleChipClick(chip)}
                 className="cursor-pointer"
               >
-                {blurb.label}
+                {chip}
               </Chip>
             ))}
           </div>
