@@ -1,13 +1,13 @@
-# Chat UX Hardening (no duplicate questions + quick‑reply chips)
-	•	Added src/lib/aiClient.ts to call the edge extractor and parse responses safely.
-	•	Refactored src/pages/Chat.tsx to:
-	•	Render quick‑reply chips from the model's suggestions (plus first‑turn tone chips).
-	•	Track a pendingQuestion and never ask it twice (prevents repeats).
-	•	Show only the model's reply_to_user (no extra local prompts).
-	•	Lock tone as soon as the model sets it once.
-	•	Use functional state updates so no messages disappear.
-	•	Kept Ping/Reset buttons for quick diagnostics.
+# M2 polish — strict JSON + chips rendering
+	•	Edge function now:
+	•	Calls OpenAI with response_format: json_object
+	•	Parses & guards the JSON envelope against a local schema
+	•	Sanitizes status.next_question to one sentence
+	•	Returns { success:true, mode:"chat", envelope } — never free text
+	•	Frontend:
+	•	Renders envelope.suggestions[] as clickable chips above the composer
+	•	Uses next_question as the input placeholder (prevents double-asking)
+	•	Shows only reply_to_user in bubbles to avoid duplicate questions
+	•	Persists the latest extracted snapshot to localStorage: cp_answers_v2
 
-Note: This assumes the edge function returns the JSON envelope we standardized:
-{ reply_to_user, extracted, status: { complete, missing, next_question }, suggestions }.
-If the envelope is missing, the chat still works but chips won't render.
+This closes the "clumsy chat / missing chips / repeated questions" issues and completes M2 integration readiness for M3 (Prompt Engine).
