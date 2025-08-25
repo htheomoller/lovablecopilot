@@ -1,24 +1,9 @@
-import type { EdgeResponse, Extracted } from './types';
-
-export async function callEdgeChat(endpoint: string, prompt: string, answers: Extracted): Promise<EdgeResponse> {
-  const body = { mode: 'chat', prompt, answers };
+export async function callCopilot(prompt: string, snapshot: unknown) {
+  const endpoint = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-generate`;
   const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode: "chat", prompt, snapshot }),
   });
-  let json: any;
-  try { json = await res.json(); } catch {
-    return { success: false, error: `Non-JSON from edge (status ${res.status})` };
-  }
-  return json as EdgeResponse;
-}
-
-export async function callEdgePing(endpoint: string) {
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode: 'ping', prompt: 'ping' })
-  });
-  try { return await res.json(); } catch { return { success: false, error: 'Non-JSON' }; }
+  return res.json();
 }

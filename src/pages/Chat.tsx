@@ -1,179 +1,117 @@
-import React from 'react';
-import { callEdgeChat, callEdgePing } from '../lib/ai';
-import type { ChatMessage, Envelope } from '../lib/types';
-import { EMPTY_EXTRACTED, mergeExtracted } from '../lib/types';
+import React from "react";
 
-const EDGE =
-  (import.meta as any).env?.VITE_SUPABASE_URL
-    ? `${(import.meta as any).env.VITE_SUPABASE_URL}/functions/v1/ai-generate`
-    : '/functions/v1/ai-generate';
+type Extracted = {
+  tone: "eli5" | "intermediate" | "developer" | null;
+  idea: string | null;
+  name: string | null;
+  audience: string | null;
+  features: string[];
+  privacy: "Private" | "Share via link" | "Public" | null;
+  auth: "Google OAuth" | "Magic email link" | "None (dev only)" | null;
+  deep_work_hours: "0.5" | "1" | "2" | "4+" | null;
+};
 
-function ChipRow({
-  items,
-  onChoose
-}: {
-  items: string[];
-  onChoose: (s: string) => void;
-}) {
-  if (!items?.length) return null;
-  return (
-    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
-      {items.map((s) => (
-        <button
-          key={s}
-          onClick={() => onChoose(s)}
-          style={{
-            borderRadius: 16,
-            padding: '6px 12px',
-            border: '1px solid #d0d7de',
-            background: '#f6f8fa',
-            cursor: 'pointer'
-          }}
-        >
-          {s}
-        </button>
-      ))}
-    </div>
-  );
-}
+type Envelope = {
+  reply_to_user: string;
+  extracted: Extracted;
+  status: { complete: boolean; missing: Array<keyof Extracted>; next_question: string };
+  suggestions: string[];
+};
+
+const initialSnapshot: Extracted = {
+  tone: null, idea: null, name: null, audience: null, features: [], privacy: null, auth: null, deep_work_hours: null,
+};
 
 export default function Chat() {
-  const [messages, setMessages] = React.useState<ChatMessage[]>([
-    {
-      role: 'assistant',
-      text:
-        "Hi — let's get started building your idea! I'm wired to an edge function. You can test it with the Ping Edge button. How should I talk to you? Say: Explain like I'm 5 (very simple), Intermediate, or Developer.",
-      ts: Date.now()
-    }
-  ]);
-  const [answers, setAnswers] = React.useState(EMPTY_EXTRACTED);
-  const [lastEnv, setLastEnv] = React.useState<Envelope | null>(null);
-  const [input, setInput] = React.useState('');
+  const [endpoint] = React.useState(
+    `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-generate`
+  );
+  const [messages, setMessages] = React.useState<Array<{ role: "user" | "assistant"; text: string }>>([]);
+  const [input, setInput] = React.useState("");
+  const [snapshot, setSnapshot] = React.useState(initialSnapshot);
+  const [chips, setChips] = React.useState<string[]>([]);
   const [busy, setBusy] = React.useState(false);
-  const listRef = React.useRef<HTMLDivElement>(null);
 
-  React.useEffect(() => {
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' });
-  }, [messages, lastEnv]);
-
-  async function onPing() {
-    const data = await callEdgePing(EDGE);
-    setMessages((m) => [
-      ...m,
-      { role: 'assistant', text: `Endpoint: ${EDGE} Ping → ${JSON.stringify(data)}`, ts: Date.now() }
-    ]);
-  }
-
-  function addUserTurn(text: string) {
-    setMessages((m) => [...m, { role: 'user', text, ts: Date.now() }]);
-  }
-
-  async function sendPrompt(text: string) {
-    if (!text.trim() || busy) return;
-    addUserTurn(text);
-    setInput('');
+  async function send(text: string) {
+    if (!text.trim()) return;
+    setMessages((m) => [...m, { role: "user", text }]);
     setBusy(true);
     try {
-      const data = await callEdgeChat(EDGE, text, answers);
-      if (!('success' in data) || data.success !== true || data.mode !== 'chat') {
-        setMessages((m) => [
-          ...m,
-          { role: 'assistant', text: `Error talking to AI: ${'error' in data ? data.error : 'unknown'}`, ts: Date.now() }
-        ]);
-        setBusy(false);
-        return;
-      }
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "chat", prompt: text, snapshot }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.success) throw new Error(data?.message || "AI error");
 
-      // Envelope built from top-level fields
       const env: Envelope = {
-        reply_to_user: (data as any).reply_to_user,
-        extracted: (data as any).extracted,
-        status: (data as any).status,
-        suggestions: (data as any).suggestions || []
+        reply_to_user: data.reply_to_user,
+        extracted: data.extracted,
+        status: data.status,
+        suggestions: data.suggestions ?? [],
       };
-      setLastEnv(env);
 
-      // show only the conversational turn (no extra client question)
-      setMessages((m) => [...m, { role: 'assistant', text: env.reply_to_user, ts: Date.now() }]);
-
-      // merge answers (one-way, never overwrite with nulls)
-      setAnswers((prev) => mergeExtracted(prev, env.extracted));
-    } catch (err: any) {
-      setMessages((m) => [
-        ...m,
-        { role: 'assistant', text: `Error talking to AI: ${err?.message || String(err)}`, ts: Date.now() }
-      ]);
+      setMessages((m) => [...m, { role: "assistant", text: env.reply_to_user }]);
+      setSnapshot(env.extracted);
+      setChips(Array.isArray(env.suggestions) ? env.suggestions.slice(0, 5) : []);
+    } catch (e: any) {
+      setMessages((m) => [...m, { role: "assistant", text: `Error talking to AI: ${e?.message || e}` }]);
     } finally {
       setBusy(false);
     }
   }
 
-  function handleChipPick(s: string) {
-    // send the chip as if the user typed it
-    void sendPrompt(s);
+  function onChip(c: string) {
+    setInput(c);
+    void send(c);
+    setInput("");
   }
 
-  // tone starter chips if tone still missing
-  const starterToneChips =
-    !answers.tone
-      ? ["Explain like I'm 5", 'Intermediate', 'Developer']
-      : [];
-
-  // render suggestions directly under the last assistant message
-  const activeChips = (lastEnv?.suggestions || []).slice(0, 6);
-
   return (
-    <div style={{ display: 'grid', gridTemplateRows: 'auto 1fr auto', height: '100%', gap: 8 }}>
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button onClick={onPing}>Ping Edge</button>
-        <div style={{ fontSize: 12, color: '#6e7781', alignSelf: 'center' }}>Endpoint: {EDGE}</div>
-      </div>
+    <div className="max-w-4xl mx-auto p-4 space-y-4">
+      <div className="text-sm text-muted-foreground">Endpoint: {endpoint}</div>
 
-      <div ref={listRef} style={{ overflowY: 'auto', padding: 8, border: '1px solid #e5e7eb', borderRadius: 8 }}>
+      <div className="space-y-2">
         {messages.map((m, i) => (
-          <div key={m.ts + i} style={{ margin: '8px 0', display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
-            <div
-              style={{
-                maxWidth: '80%',
-                padding: '10px 12px',
-                borderRadius: 12,
-                background: m.role === 'user' ? '#2563eb' : '#f3f4f6',
-                color: m.role === 'user' ? 'white' : 'black',
-                whiteSpace: 'pre-wrap'
-              }}
-            >
+          <div key={i} className={m.role === "user" ? "text-right" : ""}>
+            <div className={`inline-block rounded-2xl px-3 py-2 ${m.role === "user" ? "bg-blue-600 text-white" : "bg-gray-100"}`}>
               {m.text}
             </div>
           </div>
         ))}
-
-        {/* chips under the latest assistant turn */}
-        <ChipRow items={starterToneChips} onChoose={handleChipPick} />
-        <ChipRow items={activeChips} onChoose={handleChipPick} />
-
-        {/* tiny Answers pill for live memory */}
-        <div style={{ marginTop: 10, fontSize: 12, color: '#6b7280' }}>
-          Answers: {JSON.stringify(answers)}
-        </div>
       </div>
 
+      {chips.length > 0 && (
+        <div className="flex flex-wrap gap-2 pt-2">
+          {chips.map((c, i) => (
+            <button
+              key={i}
+              onClick={() => onChip(c)}
+              className="px-3 py-1 rounded-full bg-gray-200 hover:bg-gray-300 text-sm"
+              disabled={busy}
+            >
+              {c}
+            </button>
+          ))}
+        </div>
+      )}
+
       <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          void sendPrompt(input);
-        }}
-        style={{ display: 'flex', gap: 8 }}
+        onSubmit={(e) => { e.preventDefault(); const t = input; setInput(""); void send(t); }}
+        className="flex gap-2 pt-2"
       >
         <input
+          className="flex-1 border rounded-lg px-3 py-2"
+          placeholder="Type your message…"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Type your message…"
-          style={{ flex: 1, padding: '10px 12px', borderRadius: 8, border: '1px solid #e5e7eb' }}
+          disabled={busy}
         />
-        <button disabled={busy} type="submit">
-          {busy ? 'Sending…' : 'Send'}
-        </button>
+        <button className="px-4 py-2 rounded-lg bg-black text-white disabled:opacity-50" disabled={busy}>Send</button>
       </form>
+
+      <div className="text-xs text-gray-400">Answers: {JSON.stringify(snapshot)}</div>
     </div>
   );
 }
