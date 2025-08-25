@@ -14,6 +14,36 @@ export type Database = {
   }
   public: {
     Tables: {
+      cp_projects: {
+        Row: {
+          answers: Json
+          created_at: string
+          id: string
+          roadmap: Json | null
+          state: string
+          updated_at: string
+          user_id: string | null
+        }
+        Insert: {
+          answers?: Json
+          created_at?: string
+          id?: string
+          roadmap?: Json | null
+          state?: string
+          updated_at?: string
+          user_id?: string | null
+        }
+        Update: {
+          answers?: Json
+          created_at?: string
+          id?: string
+          roadmap?: Json | null
+          state?: string
+          updated_at?: string
+          user_id?: string | null
+        }
+        Relationships: []
+      }
       dev_breadcrumbs: {
         Row: {
           created_at: string
