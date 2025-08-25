@@ -1,69 +1,53 @@
 /**
- * Minimal, robust client for our Supabase edge function.
- * Only two modes are supported: "ping" and "chat".
- * All responses are forced to JSON, with helpful error text if not JSON.
+ * Minimal client for our Supabase Edge function.
+ * Always POST JSON and expect JSON back.
  */
+export type EdgeMode = "ping" | "chat";
+export type EdgeReply =
+  | { success: true; mode: EdgeMode; reply?: string; [k: string]: any }
+  | { success: false; error: string };
 
-const BASE = import.meta.env.VITE_SUPABASE_URL?.replace(/\/+$/, "");
-const FN = "ai-generate";
-const ENDPOINT = `${BASE}/functions/v1/${FN}`;
+const url = import.meta.env.VITE_SUPABASE_URL;
+const anon = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-type EdgeOk =
-  | { success: true; mode: "ping"; reply: string }
-  | { success: true; mode: "chat"; reply: string };
-
-type EdgeErr = { success: false; error: string };
-
-function assertEnv() {
-  if (!BASE) throw new Error("Missing VITE_SUPABASE_URL");
-  if (!import.meta.env.VITE_SUPABASE_ANON_KEY && !import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY) {
-    throw new Error("Missing VITE_SUPABASE_ANON_KEY");
-  }
+if (!url || !anon) {
+  // Surface this early in UI; caller can show it nicely.
+  console.warn("Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY");
 }
 
-async function readJsonOrThrow(res: Response) {
-  const text = await res.text();
+const endpoint = `${url}/functions/v1/ai-generate`;
+
+export async function callEdge(prompt: string, mode: EdgeMode = "chat"): Promise<EdgeReply & { raw?: string; status?: number; endpoint: string }> {
   try {
-    return JSON.parse(text);
-  } catch (_) {
-    const snippet = text.slice(0, 240);
-    throw new Error(`Non-JSON from edge (status ${res.status}): ${snippet}`);
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${anon}`,
+        apikey: anon,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ mode, prompt }),
+    });
+
+    const status = res.status;
+    const raw = await res.text();
+
+    // 404/HTML guard
+    if (!res.ok) {
+      return { success: false, error: `Edge returned ${status}`, raw, status, endpoint };
+    }
+    // JSON parse guard
+    try {
+      const json = JSON.parse(raw);
+      return { ...json, raw, status, endpoint };
+    } catch {
+      return { success: false, error: "Non-JSON from edge", raw, status, endpoint };
+    }
+  } catch (err: any) {
+    return { success: false, error: String(err?.message || err), endpoint };
   }
 }
 
-export async function pingEdge() {
-  assertEnv();
-  const res = await fetch(ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey:
-        import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
-      Authorization:
-        `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-    },
-    body: JSON.stringify({ mode: "ping" }),
-  });
-  if (!res.ok) throw new Error(`Ping failed: ${res.status}`);
-  return (await readJsonOrThrow(res)) as EdgeOk | EdgeErr;
+export function edgeInfo() {
+  return { endpoint, url, hasKeys: Boolean(url && anon) };
 }
-
-export async function chatEdge(prompt: string) {
-  assertEnv();
-  const res = await fetch(ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey:
-        import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
-      Authorization:
-        `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-    },
-    // IMPORTANT: no "nlu" mode anywhere. Only "chat".
-    body: JSON.stringify({ mode: "chat", prompt }),
-  });
-  if (!res.ok) throw new Error(`Chat failed: ${res.status}`);
-  return (await readJsonOrThrow(res)) as EdgeOk | EdgeErr;
-}
-
-export const EDGE_ENDPOINT = ENDPOINT;

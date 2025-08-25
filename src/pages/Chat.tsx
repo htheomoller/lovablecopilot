@@ -1,162 +1,91 @@
-import React, { useEffect, useRef, useState } from "react";
-import { chatEdge, pingEdge, EDGE_ENDPOINT } from "@/lib/ai";
+import { useEffect, useRef, useState } from "react";
+import { callEdge, edgeInfo } from "@/lib/ai";
 
 type Msg = { role: "assistant" | "user" | "system"; text: string; ts: number };
 
-const LS_KEY = "cp_chat_messages_v1";
-
-function loadMessages(): Msg[] {
-  try {
-    const raw = localStorage.getItem(LS_KEY);
-    if (!raw) return [];
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveMessages(msgs: Msg[]) {
-  try {
-    localStorage.setItem(LS_KEY, JSON.stringify(msgs));
-  } catch {}
-}
-
 export default function Chat() {
-  const [messages, setMessages] = useState<Msg[]>(() => {
-    const prior = loadMessages();
-    if (prior.length) return prior;
-    return [
-      {
-        role: "assistant",
-        ts: Date.now(),
-        text:
-          "Hi — let's get started building your idea! I'm wired to an edge function. You can test it with the Ping Edge button. " +
-          "How should I talk to you? Say: Explain like I'm 5 (very simple), Intermediate, or Developer.",
-      },
-    ];
-  });
+  const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [debug, setDebug] = useState<{ endpoint?: string; last?: any } | null>(null);
 
   useEffect(() => {
-    saveMessages(messages);
-  }, [messages]);
-
-  async function onPing() {
-    try {
-      const r = await pingEdge();
-      setMessages((m) => [
-        ...m,
-        {
-          role: "assistant",
-          ts: Date.now(),
-          text: `Endpoint: ${EDGE_ENDPOINT}\nPing → ${JSON.stringify(r)}`,
-        },
-      ]);
-    } catch (err: any) {
-      setMessages((m) => [
-        ...m,
-        { role: "assistant", ts: Date.now(), text: `Ping error: ${String(err?.message || err)}` },
-      ]);
-    }
-  }
-
-  function onRefresh() {
-    // Keep it a true refresh; some frameworks swallow a plain button without type
-    window.location.reload();
-  }
-
-  function onReset() {
-    // Do NOT reload. Clear state and storage so the UI is predictable.
-    localStorage.removeItem(LS_KEY);
+    const { endpoint, hasKeys } = edgeInfo();
+    const intro = `Hi — let's get started building your idea! I'm wired to an edge function. You can test it with the Ping Edge button. How should I talk to you? Say: Explain like I'm 5 (very simple), Intermediate, or Developer.`;
+    const ep = `Endpoint: ${endpoint}${hasKeys ? "" : " (⚠️ missing env keys)"}`;
     setMessages([
-      {
-        role: "assistant",
-        ts: Date.now(),
-        text:
-          "Hi — let's get started building your idea! I'm wired to an edge function. You can test it with the Ping Edge button. " +
-          "How should I talk to you? Say: Explain like I'm 5 (very simple), Intermediate, or Developer.",
-      },
+      { role: "assistant", text: intro, ts: Date.now() },
+      { role: "assistant", text: ep, ts: Date.now() + 1 },
     ]);
-    setInput("");
-    inputRef.current?.focus();
+  }, []);
+
+  async function pingEdge() {
+    setBusy(true);
+    const res = await callEdge("ping", "ping");
+    setBusy(false);
+    setDebug({ endpoint: res.endpoint, last: res });
+    setMessages(m => [
+      ...m,
+      { role: "assistant", text: `Ping → ${res.success ? "ok:true" : "ok:false"} status:${res.status ?? "?"} ${res.raw ? `reply:${res.raw}` : res.error}`, ts: Date.now() },
+    ]);
   }
 
   async function send() {
     const say = input.trim();
     if (!say) return;
     setInput("");
-    setMessages((m) => [...m, { role: "user", ts: Date.now(), text: say }]);
+    setMessages(m => [...m, { role: "user", text: say, ts: Date.now() }]);
 
-    try {
-      setBusy(true);
-      // IMPORTANT: only "chat" mode. No NLU calls.
-      const r = await chatEdge(say);
-      const reply =
-        (r as any)?.reply ??
-        (typeof r === "object" ? JSON.stringify(r) : "No reply from edge.");
-      setMessages((m) => [...m, { role: "assistant", ts: Date.now(), text: String(reply) }]);
-    } catch (err: any) {
-      setMessages((m) => [
+    setBusy(true);
+    const res = await callEdge(say, "chat");
+    setBusy(false);
+    setDebug({ endpoint: res.endpoint, last: res });
+
+    if (!res.success) {
+      setMessages(m => [
         ...m,
-        {
-          role: "assistant",
-          ts: Date.now(),
-          text: `Error talking to edge: ${String(err?.message || err)}`,
-        },
+        { role: "assistant", text: `Error talking to edge: ${res.error}${res.status ? ` (status ${res.status})` : ""}${res.raw ? `:\n${res.raw}` : ""}`, ts: Date.now() },
       ]);
-    } finally {
-      setBusy(false);
+      return;
     }
+
+    // Prefer structured reply, but fall back to raw if missing
+    const reply = typeof res.reply === "string" ? res.reply : res.raw ?? "No reply from edge.";
+    setMessages(m => [...m, { role: "assistant", text: reply, ts: Date.now() }]);
   }
 
   return (
-    <div className="max-w-3xl mx-auto p-4 space-y-4">
-      <div className="flex items-center gap-2">
-        <h1 className="text-xl font-semibold">Chat with Copilot</h1>
-        <button onClick={onRefresh} className="px-2 py-1 border rounded">
-          Refresh
-        </button>
-        <button onClick={onReset} className="px-2 py-1 border rounded">
-          Reset
-        </button>
-        <button onClick={onPing} className="px-2 py-1 border rounded">
-          Ping Edge
-        </button>
+    <div className="p-4 space-y-3">
+      <div className="flex gap-2">
+        <button className="px-3 py-1 border rounded" onClick={() => location.reload()}>Refresh</button>
+        <button className="px-3 py-1 border rounded" onClick={() => { setMessages([]); location.reload(); }}>Reset</button>
+        <button className="px-3 py-1 border rounded" onClick={pingEdge} disabled={busy}>{busy ? "Pinging…" : "Ping Edge"}</button>
       </div>
 
-      <div className="space-y-2 border rounded p-3">
+      <div className="space-y-2">
         {messages.map((m, i) => (
-          <div
-            key={i}
-            className={
-              m.role === "user"
-                ? "bg-blue-50 border border-blue-200 rounded px-3 py-2 inline-block"
-                : "bg-gray-100 border border-gray-200 rounded px-3 py-2 inline-block"
-            }
-          >
+          <div key={i} className={m.role === "user" ? "bg-blue-50 p-2 rounded" : "bg-gray-50 p-2 rounded"}>
             {m.text}
           </div>
         ))}
-        {busy && <div className="text-sm text-gray-500">…thinking</div>}
       </div>
 
       <div className="flex gap-2">
         <input
-          ref={inputRef}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => (e.key === "Enter" ? send() : undefined)}
-          placeholder="Type your message…"
           className="flex-1 px-3 py-2 border rounded"
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => (e.key === "Enter" ? send() : undefined)}
+          placeholder="Type your message…"
         />
-        <button onClick={send} className="px-3 py-2 border rounded">
-          Send
-        </button>
+        <button className="px-3 py-2 border rounded" onClick={send} disabled={busy}>Send</button>
       </div>
-      <p className="text-xs text-gray-500">Endpoint: {EDGE_ENDPOINT}</p>
+
+      {/* tiny debug footer */}
+      <div className="text-xs text-gray-500 whitespace-pre-wrap">
+        {debug?.endpoint ? `Endpoint: ${debug.endpoint}` : null}
+        {debug?.last ? `\nLast: ${JSON.stringify(debug.last)}` : null}
+      </div>
     </div>
   );
 }
