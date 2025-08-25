@@ -1,158 +1,190 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-/**
-	•	Minimal, robust Edge Function for Copilot
-	•	Modes:
-	•		•	ping: health check (no OpenAI)
-	•		•	chat: natural conversational reply (OpenAI)
-	•		•	extract: conversation + structured JSON envelope (OpenAI)
-	•	
-	•	Requires env:
-	•		•	OPENAI_API_KEY
-	•	Optional:
-	•		•	OPENAI_CHAT_MODEL (default: gpt-4o-mini)
-*/
-
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST,OPTIONS"
+  "Access-Control-Allow-Methods": "POST,OPTIONS",
 };
 
-type Extracted = {
-  tone: "eli5" | "intermediate" | "developer" | null;
-  idea: string | null;
-  name: string | null;
-  audience: string | null;
-  features: string[];
-  privacy: "Private" | "Share via link" | "Public" | null;
-  auth: "Google OAuth" | "Magic email link" | "None (dev only)" | null;
-  deep_work_hours: "0.5" | "1" | "2" | "4+" | null;
-};
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
 
-type Payload = {
-  mode?: "ping" | "chat" | "extract";
-  prompt?: string;
-  answers?: Partial<Extracted>;
-  tone?: "eli5" | "intermediate" | "developer";
-};
+/**
+	•	Pull the first top-level {…} block and try to make it strict JSON:
+	•		•	remove trailing commas before } or ]
+	•		•	convert smart quotes
+	•		•	collapse control chars
+*/
+function coerceToValidJson(raw: string): string | null {
+  if (!raw) return null;
 
-const SYSTEM_PROMPT = `
-You are Lovable Copilot, a friendly expert that onboards a user's app idea via natural conversation. Respond warmly and clearly; never feel like a rigid form.
-Objectives:
-	•	Converse naturally and adapt to the user's tone preference: "eli5", "intermediate", or "developer". Default to "intermediate" if unknown.
-	•	Quietly extract these fields as the chat progresses: tone, idea, name, audience, features[], privacy, auth, deep_work_hours.
-	•	Never ask for info already captured; if the user changes a value, acknowledge and update it.
-	•	Treat vague placeholders ("I don't know", "TBD", "later") as null and ask a gentle follow-up later; never store such literals.
-	•	When everything (except tone) is filled, summarize in a brief, bullet-free paragraph and ask for confirmation to proceed.
-	•	Stay on topic (app building). Redirect if asked for unrelated/harmful content.
+  // grab first top-level JSON object block
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) return null;
+  let s = raw.slice(start, end + 1);
 
-You MUST return ONLY a single JSON object with this shape:
+  // normalize quotes
+  s = s.replace(/[""]/g, '"').replace(/['']/g, "'");
+
+  // remove trailing commas: ,\s*] or ,\s*}
+  s = s.replace(/,\s*]/g, "]").replace(/,\s*}/g, "}");
+
+  // remove BOM/control chars
+  s = s.replace(/[\u0000-\u001F\u007F]/g, "");
+
+  return s;
+}
+
+const MODEL_DEFAULT = Deno.env.get("OPENAI_MODEL") || "gpt-4o-mini";
+const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
+
+const SYSTEM_STRICT = `
+You are Lovable Copilot, a friendly expert who onboards a user's app idea via natural conversation.
+You MUST return a single JSON object that exactly matches the schema below.
+Hard rules:
+	•	No extra text outside JSON, no markdown, no backticks.
+	•	No lists or bullets in any string fields.
+	•	No trailing commas anywhere.
+	•	Always include every key required by the schema, even when null/empty.
+	•	Never store placeholder phrases like "I don't know" as field values; use null or [] instead.
+
+Schema (all keys required):
 {
-  "reply_to_user": "string",
+  "reply_to_user": string,
   "extracted": {
-    "tone": "eli5|intermediate|developer|null",
-    "idea": "string|null",
-    "name": "string|null",
-    "audience": "string|null",
-    "features": ["string", …], // [] if none
-    "privacy": "Private|Share via link|Public|null",
-    "auth": "Google OAuth|Magic email link|None (dev only)|null",
-    "deep_work_hours": "0.5|1|2|4+|null"
+    "tone": "eli5" | "intermediate" | "developer" | null,
+    "idea": string | null,
+    "name": string | null,
+    "audience": string | null,
+    "features": string[],  // empty [] if none
+    "privacy": "Private" | "Share via link" | "Public" | null,
+    "auth": "Google OAuth" | "Magic email link" | "None (dev only)" | null,
+    "deep_work_hours": "0.5" | "1" | "2" | "4+" | null
   },
   "status": {
-    "complete": true|false, // true only when all extracted fields EXCEPT tone are non-null/non-empty
-    "missing": ["field", …], // the remaining keys to obtain
-    "next_question": "string" // one friendly question aimed at the most important missing piece
+    "complete": boolean,
+    "missing": string[],     // keys from extracted that are null/empty (tone is optional)
+    "next_question": string  // one short, friendly question for the next missing item
   },
-  "suggestions": ["short chip", …] // optional quick-reply chips relevant to next_question
+  "suggestions": string[]     // short chip labels relevant to next_question
 }
 
-Rules:
-	•	Output must be valid JSON: no markdown, no comments, no extra text.
-	•	Keep "features" concise strings; avoid long sentences there.
-	•	Use the user's current partial state (provided separately) as the single source of truth for what is already known.
-`.trim();
-
-async function openAIChat(messages: any[], maxTokens = 600) {
-  const apiKey = Deno.env.get("OPENAI_API_KEY");
-  if (!apiKey) throw new Error("OPENAI_API_KEY is not set");
-  const model = Deno.env.get("OPENAI_CHAT_MODEL") || "gpt-4o-mini";
-
-  const r = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model, messages, max_completion_tokens: maxTokens })
-  });
-
-  if (!r.ok) {
-    const t = await r.text();
-    throw new Error(`OpenAI upstream error: ${t}`);
-  }
-  const j = await r.json();
-  const text = j?.choices?.[0]?.message?.content ?? "";
-  return String(text);
-}
-
-function json(data: unknown, init: ResponseInit = {}) {
-  return new Response(JSON.stringify(data), {
-    ...init,
-    headers: { ...corsHeaders, "Content-Type": "application/json" }
-  });
-}
+Behavioral rules:
+	•	Converse naturally in the user's chosen "tone". If no tone yet, default to "intermediate".
+	•	Never re-ask for a field you already captured unless the user changes it; if they do, acknowledge and update.
+	•	If the user gives a vague or non-answer (e.g., "later", "TBD", "idk"), set that field to null and move on with a clarifying question later.
+`;
 
 serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
-    const { mode = "chat", prompt = "", answers = {}, tone }: Payload = await req.json().catch(() => ({}));
+    const { mode = "chat", prompt = "", answers = null } = await req.json().catch(() => ({}));
+    if (mode === "ping") return jsonResponse({ success: true, mode: "ping", reply: "pong" });
 
-    if (mode === "ping") {
-      return json({ success: true, mode: "ping", reply: "pong" });
+    if (!OPENAI_API_KEY) {
+      return jsonResponse({ success: false, error: "OPENAI_API_KEY not set" }, 500);
     }
 
-    if (mode === "chat") {
-      const userTone = tone || (answers.tone as any) || "intermediate";
-      const sys = `${SYSTEM_PROMPT}\n\nReturn the JSON envelope described above.\nTone to use: ${userTone}`;
-      const messages = [
-        { role: "system", content: sys },
-        { role: "user", content: `User said: "${prompt}"\nCurrent extracted (may be partial): ${JSON.stringify(answers || {})}` }
-      ];
+    if (mode === "chat" || mode === "extract") {
+      const userMsg =
+        mode === "extract"
+          ? `Here is the current collected snapshot (may contain nulls): ${JSON.stringify(answers)}.\nUser said: ${prompt}`
+          : prompt;
 
-      const raw = await openAIChat(messages, 700);
+      const body = {
+        model: MODEL_DEFAULT,
+        // Ask OpenAI to emit strict JSON
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: SYSTEM_STRICT.trim() },
+          { role: "user", content: userMsg || "Say hello." },
+        ],
+        max_output_tokens: 700,
+      };
 
-      // Try strict JSON parse; if it fails, provide a guarded error with the raw text for debugging
+      const r = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      if (!r.ok) {
+        const text = await r.text();
+        console.error("OpenAI upstream error:", text);
+        return jsonResponse({ success: false, error: "upstream_error", details: text }, 502);
+      }
+
+      const j = await r.json();
+      const raw = j?.choices?.[0]?.message?.content?.trim() || "";
+
+      // First try: as-is parse
+      let env: any = null;
       try {
-        const parsed = JSON.parse(raw);
-        return json({ success: true, mode: "chat", ...parsed });
+        env = JSON.parse(raw);
       } catch {
-        // As a fallback, still respond but mark parse_error to help the client surface it
-        return json({ success: true, mode: "chat", parse_error: true, raw });
+        // Second try: coerce
+        const fixed = coerceToValidJson(raw);
+        if (fixed) {
+          try {
+            env = JSON.parse(fixed);
+          } catch (e2) {
+            console.error("Parse failed after coerce:", e2, { fixed });
+          }
+        }
       }
+
+      if (!env || typeof env !== "object") {
+        // graceful fallback – keep the chat alive
+        return jsonResponse({
+          success: true,
+          mode,
+          repaired: false,
+          raw,
+          reply: "I had trouble parsing that. I'll keep going and ask the next question—feel free to continue.",
+        });
+      }
+
+      // Basic envelope validation + normalization
+      const must = ["reply_to_user", "extracted", "status", "suggestions"];
+      for (const k of must) if (!(k in env)) env[k] = k === "suggestions" ? [] : k === "extracted" ? {} : {};
+
+      // ensure all extracted keys exist
+      env.extracted = {
+        tone: env.extracted.tone ?? null,
+        idea: env.extracted.idea ?? null,
+        name: env.extracted.name ?? null,
+        audience: env.extracted.audience ?? null,
+        features: Array.isArray(env.extracted.features) ? env.extracted.features : [],
+        privacy: env.extracted.privacy ?? null,
+        auth: env.extracted.auth ?? null,
+        deep_work_hours: env.extracted.deep_work_hours ?? null,
+      };
+
+      // ensure status shape
+      env.status = {
+        complete: !!env.status.complete,
+        missing: Array.isArray(env.status.missing) ? env.status.missing : [],
+        next_question: typeof env.status.next_question === "string" ? env.status.next_question : "",
+      };
+
+      // ensure suggestions array
+      env.suggestions = Array.isArray(env.suggestions) ? env.suggestions : [];
+
+      return jsonResponse({ success: true, mode, envelope: env });
     }
 
-    if (mode === "extract") {
-      // Same as chat, but the client expects strictly the JSON envelope
-      const userTone = tone || (answers.tone as any) || "intermediate";
-      const sys = `${SYSTEM_PROMPT}\n\nReturn the JSON envelope described above.\nTone to use: ${userTone}`;
-      const messages = [
-        { role: "system", content: sys },
-        { role: "user", content: `User said: "${prompt}"\nCurrent extracted (may be partial): ${JSON.stringify(answers || {})}` }
-      ];
+    // default fallback
+    return jsonResponse({ success: true, mode: "chat", reply: `Baseline echo: "${prompt}"` });
 
-      const raw = await openAIChat(messages, 700);
-      try {
-        const parsed = JSON.parse(raw);
-        return json({ success: true, mode: "extract", ...parsed });
-      } catch (e) {
-        return json({ success: false, mode: "extract", error: "model_returned_non_json", raw }, { status: 502 });
-      }
-    }
-
-    // Unknown mode
-    return json({ success: false, error: `unknown_mode: ${mode}` }, { status: 400 });
-
-  } catch (err: any) {
-    return json({ success: false, error: err?.message || String(err) }, { status: 500 });
+  } catch (err) {
+    console.error(err);
+    const msg = err instanceof Error ? err.message : String(err);
+    return jsonResponse({ success: false, error: msg }, 500);
   }
 });

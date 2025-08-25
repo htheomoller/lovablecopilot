@@ -1,10 +1,4 @@
-/**
- * Client helper to call the OpenAI-powered conversation edge function
- */
-const BASE = "https://yjfqfnmrsdfbvlyursdi.supabase.co";
-const EDGE = `${BASE}/functions/v1/ai-generate`;
-
-type ExtractedData = {
+export type Extracted = {
   tone: "eli5" | "intermediate" | "developer" | null;
   idea: string | null;
   name: string | null;
@@ -15,33 +9,48 @@ type ExtractedData = {
   deep_work_hours: "0.5" | "1" | "2" | "4+" | null;
 };
 
-export async function callConversationAPI(
-  prompt: string = "",
-  answers: Partial<ExtractedData> = {},
-  tone?: "eli5" | "intermediate" | "developer",
-  mode: "ping" | "chat" | "extract" = "chat"
-) {
-  const r = await fetch(EDGE, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "apikey": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlqZnFmbm1yc2RmYnZseXVyc2RpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTU5Mjk2MDQsImV4cCI6MjA3MTUwNTYwNH0.gPkkIglRw7yz7z-XWB0ZOTfWb9jlOZkt_2wCRT4q_gQ",
-      "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlqZnFmbm1yc2RmYnZseXVyc2RpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTU5Mjk2MDQsImV4cCI6MjA3MTUwNTYwNH0.gPkkIglRw7yz7z-XWB0ZOTfWb9jlOZkt_2wCRT4q_gQ",
-    },
-    body: JSON.stringify({ 
-      mode,
-      prompt,
-      answers,
-      tone
-    }),
-  });
+export type Envelope = {
+  reply_to_user: string;
+  extracted: Extracted;
+  status: {
+    complete: boolean;
+    missing: string[];
+    next_question: string;
+  };
+  suggestions: string[];
+};
 
-  const text = await r.text();
+const ENDPOINT = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-generate`;
+
+async function callEdge(payload: any) {
+  const res = await fetch(ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: import.meta.env.VITE_SUPABASE_ANON_KEY },
+    body: JSON.stringify(payload),
+  });
+  const text = await res.text();
+  let json: any = null;
   try {
-    const json = JSON.parse(text);
-    if (!r.ok) throw new Error(json?.error || "Edge " + r.status);
-    return json;
+    json = JSON.parse(text);
   } catch {
-    throw new Error("Non-JSON from edge (status " + r.status + "): " + text.slice(0, 160));
+    throw new Error(`Non-JSON from edge (status ${res.status}): ${text}`);
   }
+  if (!res.ok) throw new Error(json?.error || `Edge error ${res.status}`);
+  return json;
+}
+
+export async function aiChat(prompt: string, mode: "chat" | "extract" = "chat", answers?: Partial<Extracted>) {
+  const data = await callEdge({ mode, prompt, answers });
+  if (data?.envelope) return data.envelope as Envelope;
+
+  // graceful fallback when edge couldn't parse the LLM output
+  return {
+    reply_to_user: data?.reply ?? "Thanks — tell me a bit more and I'll keep going.",
+    extracted: {
+      tone: null, idea: null, name: null, audience: null, features: [],
+      privacy: null, auth: null, deep_work_hours: null
+    },
+    status: { complete: false, missing: ["idea"], next_question: "What's your app idea in one short line?" },
+    suggestions: [],
+  } as Envelope;
 }
