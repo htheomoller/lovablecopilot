@@ -1,218 +1,248 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { edgePing, edgeChat, edgeExtract } from "@/lib/ai";
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { callExtractor, type ExtractorEnvelope } from '@/lib/aiClient'
 
-type Msg = { role: "assistant" | "user" | "system"; text: string; ts: number };
-type Answers = {
-  tone: "eli5" | "intermediate" | "developer" | null;
-  idea: string | null;
-  name: string | null;
-  audience: string | null;
-  features: string[];
-  privacy: "Private" | "Share via link" | "Public" | null;
-  auth: "Google OAuth" | "Magic email link" | "None (dev only)" | null;
-  deep_work_hours: "0.5" | "1" | "2" | "4+" | null;
-};
+// If you already centralize env, feel free to replace these with your helpers:
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string
+const EDGE_ENDPOINT = `${SUPABASE_URL}/functions/v1/ai-generate`
 
-const EXTRACTOR_SPEC = `
-You are Lovable Copilot. Always output ONLY a single JSON object with this shape:
-{
-  "reply_to_user": "string",
-  "extracted": {
-    "tone": "eli5|intermediate|developer|null",
-    "idea": "string|null",
-    "name": "string|null",
-    "audience": "string|null",
-    "features": "string[]",
-    "privacy": "Private|Share via link|Public|null",
-    "auth": "Google OAuth|Magic email link|None (dev only)|null",
-    "deep_work_hours": "0.5|1|2|4+|null"
-  },
-  "status": {
-    "complete": "boolean",
-    "missing": "string[]",
-    "next_question": "string"
-  },
-  "suggestions": "string[]"
+type Msg = { role: 'user' | 'assistant' | 'system'; text: string; ts: number }
+
+type Session = {
+  messages: Msg[]
+  lastEnvelope: ExtractorEnvelope | null
+  pendingQuestion: string | null
+  toneLocked: boolean
 }
-Rules:
-	•	Be warm and succinct. Don't sound like a form. No bullet lists.
-	•	Never store literal non-answers like "I don't know"; use null and ask a clarifier later.
-	•	If a field changes, confirm the update in reply_to_user.
-	•	If all required fields (except tone) are filled, summarize in a short paragraph and ask for confirmation.
-`;
 
-function emptyAnswers(): Answers {
-  return {
-    tone: null,
-    idea: null,
-    name: null,
-    audience: null,
-    features: [],
-    privacy: null,
-    auth: null,
-    deep_work_hours: null
-  };
+const initialToneChips = [
+  "Explain like I'm 5",
+  'Intermediate',
+  'Developer'
+]
+
+const starter: Session = {
+  messages: [],
+  lastEnvelope: null,
+  pendingQuestion: null,
+  toneLocked: false
+}
+
+function saveSession(s: Session) {
+  try { localStorage.setItem('cp_chat_v3', JSON.stringify(s)) } catch {}
+}
+function loadSession(): Session {
+  try {
+    const j = localStorage.getItem('cp_chat_v3')
+    if (!j) return structuredClone(starter)
+    return JSON.parse(j) as Session
+  } catch { return structuredClone(starter) }
 }
 
 export default function Chat() {
-  const [messages, setMessages] = useState<Msg[]>([]);
-  const [input, setInput] = useState("");
-  const [err, setErr] = useState<string | null>(null);
-  const [suggestions, setSuggestions] = useState<string[]>([]);
-  const [answers, setAnswers] = useState(() => {
-    try {
-      const s = localStorage.getItem("cp_answers_v2");
-      return s ? JSON.parse(s) : emptyAnswers();
-    } catch { return emptyAnswers(); }
-  });
+  const [input, setInput] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [s, setS] = useState(loadSession())
+  const inputRef = useRef<HTMLInputElement>(null)
 
+  // Boot greeting once
   useEffect(() => {
-    if (messages.length === 0) {
-      setMessages([
-        { role: "assistant", text: "Hi — let's get started building your idea! I'm wired to an edge function. You can test it with the Ping Edge button. How should I talk to you? Say: Explain like I'm 5 (very simple), Intermediate, or Developer.", ts: Date.now() }
-      ]);
-      setSuggestions(["Explain like I'm 5", "Intermediate", "Developer"]);
-    }
-  }, []);
-
-  useEffect(() => {
-    try { localStorage.setItem("cp_answers_v2", JSON.stringify(answers)); } catch {}
-  }, [answers]);
-
-  async function onPing() {
-    setErr(null);
-    const r = await edgePing();
-    if (!(r as any).ok) {
-      setErr(`Ping error: ${(r as any).error || "unknown"} ${String((r as any).status || "")}`);
-      return;
-    }
-    const last = (r as any).raw || JSON.stringify(r);
-    setMessages(m => [...m, { role: "assistant", text: `Endpoint: ${(r as any).endpoint}\nPing → ok:${(r as any).ok} status:${(r as any).status} reply:${(r as any).raw || ""}`, ts: Date.now() }]);
-  }
-
-  async function send(chipText?: string) {
-    const say = (chipText ?? input).trim();
-    if (!say) return;
-    setInput("");
-    setErr(null);
-    setMessages(m => [...m, { role: "user", text: say, ts: Date.now() }]);
-
-    // Use extractor mode for all onboarding turns
-    const r = await edgeExtract(say, EXTRACTOR_SPEC);
-
-    if (!(r as any).ok) {
-      const e = r as any;
-      // surface meaningful errors
-      if (e.error === "missing_openai_key") {
-        setMessages(m => [...m, { role: "assistant", text: "Server is missing OPENAI_API_KEY. Please add it to Supabase Edge Function secrets and redeploy.", ts: Date.now() }]);
-      } else if (e.error === "upstream_error" || e.error === "upstream_invalid_json" || e.error === "edge_non_200") {
-        setMessages(m => [...m, { role: "assistant", text: `Upstream issue. Status: ${e.status || "?"}. Raw: ${e.raw ? String(e.raw).slice(0, 280) : "n/a"}`, ts: Date.now() }]);
-      } else {
-        setMessages(m => [...m, { role: "assistant", text: `Error talking to AI: ${e.error || "unknown"}`, ts: Date.now() }]);
+    if (s.messages.length === 0) {
+      const m: Msg = {
+        role: 'assistant',
+        ts: Date.now(),
+        text:
+          "Hi — let's get started building your idea! I'm wired to an edge function. " +
+          "You can test it with the Ping Edge button. How should I talk to you? " +
+          "Say: Explain like I'm 5 (very simple), Intermediate, or Developer."
       }
-      setSuggestions([]);
-      return;
+      const next: Session = { ...s, messages: [m], pendingQuestion: null }
+      setS(next); saveSession(next)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
-    const jr = r as any;
-    // Expect { success:true, mode:"extract", data: {...}, raw: "..." }
-    const data = jr?.data;
-    if (!data || typeof data !== "object") {
-      setMessages(m => [...m, { role: "assistant", text: "Parse error: AI did not return the expected JSON envelope.", ts: Date.now() }]);
-      setSuggestions([]);
-      return;
-    }
+  // Helpers to append messages safely (no disappearing turns)
+  const push = (msg: Msg) => {
+    setS(prev => {
+      const next = { ...prev, messages: [...prev.messages, msg] }
+      saveSession(next)
+      return next
+    })
+  }
 
-    const reply = data.reply_to_user ?? "(no reply)";
-    const extracted = data.extracted ?? {};
-    const nextAnswers: Answers = {
-      tone: extracted.tone ?? answers.tone ?? null,
-      idea: extracted.idea ?? answers.idea ?? null,
-      name: extracted.name ?? answers.name ?? null,
-      audience: extracted.audience ?? answers.audience ?? null,
-      features: Array.isArray(extracted.features) ? extracted.features : (answers.features ?? []),
-      privacy: extracted.privacy ?? answers.privacy ?? null,
-      auth: extracted.auth ?? answers.auth ?? null,
-      deep_work_hours: extracted.deep_work_hours ?? answers.deep_work_hours ?? null
-    };
+  // Guard to prevent duplicate questions: we only trust model.next_question
+  const reflectEnvelope = (env: ExtractorEnvelope) => {
+    setS(prev => {
+      const prevQ = (prev.pendingQuestion || '').trim()
+      const modelQ = (env.status?.next_question || '').trim()
+      const nextQuestion = modelQ && modelQ !== prevQ ? modelQ : modelQ ? prevQ : null
+      const next: Session = {
+        ...prev,
+        lastEnvelope: env,
+        pendingQuestion: nextQuestion
+      }
+      saveSession(next)
+      return next
+    })
+  }
 
-    setAnswers(nextAnswers);
-    setMessages(m => [...m, { role: "assistant", text: String(reply), ts: Date.now() }]);
+  const suggestions = useMemo(() => {
+    // If we have model suggestions, prefer them. Otherwise, on the first turn show tone chips.
+    if (s.lastEnvelope?.suggestions?.length) return s.lastEnvelope.suggestions
+    if (!s.toneLocked) return initialToneChips
+    return []
+  }, [s.lastEnvelope, s.toneLocked])
 
-    const nextQ = data?.status?.next_question;
-    const sugg = Array.isArray(data?.suggestions) ? data.suggestions : [];
-    
-    // Update suggestions state
-    if (sugg.length > 0) {
-      setSuggestions(sugg.slice(0, 6)); // Limit to 6 chips
-    } else if (!nextAnswers.tone) {
-      setSuggestions(["Explain like I'm 5", "Intermediate", "Developer"]);
-    } else {
-      setSuggestions([]);
-    }
-    
-    if (nextQ) {
-      setMessages(m => [...m, { role: "assistant", text: nextQ, ts: Date.now() }]);
+  const sendToAI = async (userText: string) => {
+    setBusy(true)
+    try {
+      const ctx = s.lastEnvelope ? s.lastEnvelope.extracted : null
+      const { ok, data, error, raw } = await callExtractor(EDGE_ENDPOINT, SUPABASE_ANON_KEY, userText, ctx)
+      if (!ok || !data) {
+        push({ role: 'assistant', ts: Date.now(), text: `Error talking to AI${error ? `: ${error}` : ''}${raw ? `\n${raw}` : ''}` })
+        return
+      }
+
+      // Lock tone as soon as we see first valid tone
+      if (!s.toneLocked && data.extracted?.tone) {
+        setS(prev => { const next = { ...prev, toneLocked: true }; saveSession(next); return next })
+      }
+
+      // Show the assistant's natural reply only (no local echo/question)
+      push({ role: 'assistant', ts: Date.now(), text: data.reply_to_user })
+
+      // Track last envelope & next question to avoid repeats
+      reflectEnvelope(data)
+
+    } finally {
+      setBusy(false)
     }
   }
 
-  function onChipClick(label: string) {
-    // Map friendly tone labels to internal tokens
-    const normalized = 
-      /^explain like i'?m 5$/i.test(label) ? 'eli5'
-      : /^intermediate$/i.test(label) ? 'intermediate' 
-      : /^developer$/i.test(label) ? 'developer'
-      : label;
-    
-    send(normalized);
+  const handleSend = async (text?: string) => {
+    const say = (text ?? input).trim()
+    if (!say) return
+    setInput('')
+    push({ role: 'user', ts: Date.now(), text: say })
+    await sendToAI(say)
+    // Refocus for speed
+    requestAnimationFrame(() => inputRef.current?.focus())
   }
 
-  function QuickChips() {
-    if (!suggestions.length) return null;
-    return (
-      <div className="flex flex-wrap gap-2 mt-2">
-        {suggestions.map((chip, i) => (
-          <button
-            key={`${chip}-${i}`}
-            onClick={() => onChipClick(chip)}
-            className="px-3 py-1 rounded-full border text-sm hover:bg-muted transition-colors"
-          >
-            {chip}
-          </button>
-        ))}
-      </div>
-    );
+  const handleChip = async (chip: string) => {
+    // Tone chips → send a small normalized message
+    if (initialToneChips.includes(chip)) {
+      const normalized =
+        chip.toLowerCase().includes('explain') ? 'tone: eli5' :
+        chip.toLowerCase().includes('developer') ? 'tone: developer' :
+        'tone: intermediate'
+      await handleSend(normalized)
+      return
+    }
+    await handleSend(chip)
+  }
+
+  const handlePing = async () => {
+    try {
+      const r = await fetch(EDGE_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(SUPABASE_ANON_KEY ? { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` } : {})
+        },
+        body: JSON.stringify({ mode: 'ping' })
+      })
+      const raw = await r.text()
+      push({ role: 'system', ts: Date.now(), text: `Endpoint: ${EDGE_ENDPOINT}\nPing → ok:${r.ok} status:${r.status} reply:${raw}` })
+    } catch (e: any) {
+      push({ role: 'system', ts: Date.now(), text: `Ping error: ${e?.message || 'unknown'}` })
+    }
+  }
+
+  const handleReset = () => {
+    const cleared: Session = structuredClone(starter)
+    saveSession(cleared)
+    setS(cleared)
+    // Re-greet
+    push({
+      role: 'assistant',
+      ts: Date.now(),
+      text:
+        "Hi — let's get started building your idea! I'm wired to an edge function. " +
+        "You can test it with the Ping Edge button. How should I talk to you? " +
+        "Say: Explain like I'm 5 (very simple), Intermediate, or Developer."
+    })
   }
 
   return (
     <div className="max-w-3xl mx-auto p-4 space-y-4">
-      <div className="flex gap-2">
-        <button className="px-3 py-1 rounded border" onClick={onPing}>Ping Edge</button>
-        {err && <div className="text-red-600 text-sm">{err}</div>}
+      <div className="flex gap-2 items-center">
+        <h1 className="text-lg font-medium">Chat with Copilot</h1>
+        <button
+          onClick={handlePing}
+          className="px-3 py-1 text-sm rounded border hover:bg-muted"
+        >
+          Ping Edge
+        </button>
+        <button
+          onClick={handleReset}
+          className="px-3 py-1 text-sm rounded border hover:bg-muted"
+        >
+          Reset
+        </button>
       </div>
 
-      <div className="space-y-2 bg-white border rounded p-3 min-h-[200px]">
-        {messages.map((m, i) => (
-          <div key={i} className={m.role === "user" ? "text-right" : "text-left"}>
-            <div className={`inline-block px-3 py-2 rounded ${m.role === "user" ? "bg-blue-50" : m.role === "assistant" ? "bg-gray-50" : "bg-amber-50"}`}>
+      <div className="text-xs opacity-70">
+        Endpoint: {EDGE_ENDPOINT}
+      </div>
+
+      <div className="border rounded p-3 h-[55vh] overflow-auto space-y-3 bg-white">
+        {s.messages.map((m, i) => (
+          <div key={i} className={m.role === 'user' ? 'text-right' : 'text-left'}>
+            <div className={`inline-block rounded-2xl px-3 py-2 text-sm ${m.role === 'user' ? 'bg-blue-600 text-white' : (m.role === 'assistant' ? 'bg-gray-100' : 'bg-yellow-50')}`}>
               {m.text}
             </div>
           </div>
         ))}
+
+        {busy && (
+          <div className="text-left">
+            <div className="inline-block rounded-2xl px-3 py-2 text-sm bg-gray-100">
+              …thinking
+            </div>
+          </div>
+        )}
+
+        {/* Quick reply chips */}
+        {suggestions.length > 0 && (
+          <div className="flex flex-wrap gap-2 pt-1">
+            {suggestions.map((sug, idx) => (
+              <button
+                key={idx}
+                onClick={() => handleChip(sug)}
+                className="px-2.5 py-1 text-xs rounded-full border hover:bg-gray-50"
+                title="Quick reply"
+              >
+                {sug}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
-      <QuickChips />
-
+      {/* Input row */}
       <div className="flex gap-2">
         <input
-          className="flex-1 border rounded px-3 py-2"
+          ref={inputRef}
           value={input}
           onChange={e => setInput(e.target.value)}
-          onKeyDown={e => e.key === "Enter" ? send() : undefined}
+          onKeyDown={e => e.key === 'Enter' ? handleSend() : undefined}
           placeholder="Type your message…"
+          className="flex-1 px-3 py-2 border rounded"
         />
-        <button className="px-3 py-2 rounded bg-black text-white" onClick={() => send()}>Send</button>
+        <button onClick={() => handleSend()} className="px-4 py-2 rounded bg-black text-white">Send</button>
       </div>
     </div>
-  );
+  )
 }
