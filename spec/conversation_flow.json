@@ -1,0 +1,182 @@
+{
+  "version": "m2.1",
+  "goal": "Collect normalized project inputs in a fixed order, reflect back, confirm, then generate a roadmap.",
+  "fields": {
+    "tone": { "type": "enum", "values": ["explain_like_im_5","intermediate","developer"] },
+    "idea": { "type": "string", "min": 3, "max": 180 },
+    "name": { "type": "string", "min": 3, "max": 40 },
+    "audience": { "type": "string", "min": 3, "max": 140 },
+    "features": { "type": "string[]", "minItems": 1, "maxItems": 5 },
+    "privacy": { "type": "enum", "values": ["private","share_link","public"] },
+    "auth": { "type": "enum", "values": ["google_oauth","magic_link","none_dev_only"] }
+  },
+  "order": ["tone","idea","name","audience","features","privacy","auth"],
+  "blurbs": {
+    "tone": [
+      { "label": "Explain like I'm 5", "value": "explain_like_im_5" },
+      { "label": "Intermediate", "value": "intermediate" },
+      { "label": "Developer", "value": "developer" }
+    ],
+    "features": [
+      { "label": "Generate roadmap", "value": "generate_roadmap" },
+      { "label": "Draft PRD", "value": "draft_prd" },
+      { "label": "Code health checks", "value": "code_health" },
+      { "label": "Setup auth", "value": "setup_auth" },
+      { "label": "Image processing", "value": "image_processing" },
+      { "label": "Payments", "value": "payments" }
+    ],
+    "privacy": [
+      { "label": "Private", "value": "private" },
+      { "label": "Share via link", "value": "share_link" },
+      { "label": "Public", "value": "public" }
+    ],
+    "auth": [
+      { "label": "Google OAuth", "value": "google_oauth" },
+      { "label": "Magic email link", "value": "magic_link" },
+      { "label": "None (dev only)", "value": "none_dev_only" }
+    ]
+  },
+  "normalizers": {
+    "tone": [
+      { "match": "(^|\\b)(eli5|explain like i'?m 5|very simple)\\b", "value": "explain_like_im_5" },
+      { "match": "(^|\\b)intermediate\\b", "value": "intermediate" },
+      { "match": "(^|\\b)dev(eloper)?\\b", "value": "developer" }
+    ],
+    "privacy": [
+      { "match": "\\bprivate\\b", "value": "private" },
+      { "match": "share", "value": "share_link" },
+      { "match": "\\bpublic\\b", "value": "public" }
+    ],
+    "auth": [
+      { "match": "google|oauth", "value": "google_oauth" },
+      { "match": "magic|email\\s*link", "value": "magic_link" },
+      { "match": "(^|\\b)(none|no auth|dev only)\\b", "value": "none_dev_only" }
+    ],
+    "features": {
+      "split": "[,;\\n]+",
+      "map": [
+        { "match": "roadmap", "value": "generate_roadmap" },
+        { "match": "prd|spec", "value": "draft_prd" },
+        { "match": "health|lint|quality|coverage", "value": "code_health" },
+        { "match": "auth|login|signup", "value": "setup_auth" },
+        { "match": "image|photo|restore|process", "value": "image_processing" },
+        { "match": "pay|stripe|checkout", "value": "payments" }
+      ],
+      "fallback": "free_text"
+    }
+  },
+  "state_machine": {
+    "start": "ASK_TONE",
+    "states": {
+      "ASK_TONE": {
+        "needs": ["tone"],
+        "prompt": "How should I talk to you? Choose a style.",
+        "blurbs": "tone",
+        "onAccept": "NEXT_FIELD_OR_CONFIRM"
+      },
+      "ASK_IDEA": {
+        "needs": ["idea"],
+        "prompt": "What's your app idea in one short line?",
+        "onAccept": "NEXT_FIELD_OR_CONFIRM"
+      },
+      "ASK_NAME": {
+        "needs": ["name"],
+        "prompt": "Do you already have a name? If not, say 'invent one' and I'll suggest a provisional working name.",
+        "onAccept": "NEXT_FIELD_OR_CONFIRM"
+      },
+      "ASK_AUDIENCE": {
+        "needs": ["audience"],
+        "prompt": "Who is it for? Describe your ideal user or customer.",
+        "onAccept": "NEXT_FIELD_OR_CONFIRM"
+      },
+      "ASK_FEATURES": {
+        "needs": ["features"],
+        "prompt": "List 2–5 must‑have features, or tap to pick.",
+        "blurbs": "features",
+        "onAccept": "NEXT_FIELD_OR_CONFIRM"
+      },
+      "ASK_PRIVACY": {
+        "needs": ["privacy"],
+        "prompt": "Data visibility preference?",
+        "blurbs": "privacy",
+        "onAccept": "NEXT_FIELD_OR_CONFIRM"
+      },
+      "ASK_AUTH": {
+        "needs": ["auth"],
+        "prompt": "Sign‑in method?",
+        "blurbs": "auth",
+        "onAccept": "NEXT_FIELD_OR_CONFIRM"
+      },
+      "CONFIRM": {
+        "prompt": "Here's what I captured. Is this correct? Reply Yes to proceed or type what to change.",
+        "onYes": "GENERATE_ROADMAP",
+        "onChange": "ROUTE_TO_FIELD"
+      },
+      "GENERATE_ROADMAP": {
+        "action": "llm_generate_roadmap",
+        "onDone": "DONE"
+      },
+      "DONE": {
+        "prompt": "Roadmap ready. Would you like to create milestones now or revise anything?"
+      }
+    }
+  },
+  "reflect_templates": {
+    "tone": "Okay — I'll keep it {{tone}}.",
+    "idea": "Noted: idea → \"{{idea}}\".",
+    "name": "Working name set to \"{{name}}\" (you can change it later).",
+    "audience": "Audience captured: {{audience}}.",
+    "features": "Features captured: {{features|join:\", \"}}.",
+    "privacy": "Privacy set to {{privacy}}.",
+    "auth": "Auth method set to {{auth}}."
+  },
+  "confirm_template": "Summary\\n- Tone: {{tone}}\\n- Idea: {{idea}}\\n- Name: {{name}}\\n- Audience: {{audience}}\\n- Features: {{features|join:\", \"}}\\n- Privacy: {{privacy}}\\n- Auth: {{auth}}",
+  "edge_contract": {
+    "request": {
+      "method": "POST",
+      "path": "/functions/v1/ai-generate",
+      "body": {
+        "mode": "chat",
+        "project_id": "string",
+        "message": "string",
+        "client_time": "iso8601"
+      },
+      "headers_required": ["authorization","apikey","content-type: application/json"]
+    },
+    "response": {
+      "ok": {
+        "success": true,
+        "reply": "string",
+        "state": "ASK_TONE|ASK_IDEA|ASK_NAME|ASK_AUDIENCE|ASK_FEATURES|ASK_PRIVACY|ASK_AUTH|CONFIRM|GENERATE_ROADMAP|DONE",
+        "answers": {
+          "tone": "enum|null",
+          "idea": "string|null",
+          "name": "string|null",
+          "audience": "string|null",
+          "features": ["string"],
+          "privacy": "enum|null",
+          "auth": "enum|null"
+        },
+        "blurbs": [{ "label": "string", "value": "string" }],
+        "summary": "string|null",
+        "raw": "string|null"
+      },
+      "error": { "success": false, "error": "string", "state": "string" }
+    }
+  },
+  "db": {
+    "table": "cp_projects",
+    "columns": {
+      "id": "uuid pk",
+      "answers": "jsonb",
+      "state": "text",
+      "created_at": "timestamptz",
+      "updated_at": "timestamptz"
+    }
+  },
+  "llm": {
+    "model": "gpt-4o-mini",
+    "system": "You are a helpful onboarding guide. Be concise, friendly, and context-aware. Never re-ask a field that is already filled. After each acceptance, reflect back using reflect_templates. When all required fields are present, render confirm_template and move to CONFIRM. Only after an explicit Yes, call roadmap generation.",
+    "roadmap_prompt": "Given normalized fields {{answers}}, draft a 3‑phase roadmap (Discover → Build → Launch) with 3–5 milestones per phase, each with outcome, tasks, and acceptance criteria. Output plain JSON with phases[].milestones[]."
+  }
+}
