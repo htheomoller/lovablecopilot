@@ -1,191 +1,179 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import type { Envelope, EdgeReply } from "@/lib/copilotTypes";
+import React from 'react';
+import { callEdgeChat, callEdgePing } from '../lib/ai';
+import type { ChatMessage, Envelope } from '../lib/types';
+import { EMPTY_EXTRACTED, mergeExtracted } from '../lib/types';
 
-const EDGE_URL =
-  (import.meta as any).env?.VITE_SUPABASE_URL?.replace(/\/+$/, "") +
-  "/functions/v1/ai-generate";
+const EDGE =
+  (import.meta as any).env?.VITE_SUPABASE_URL
+    ? `${(import.meta as any).env.VITE_SUPABASE_URL}/functions/v1/ai-generate`
+    : '/functions/v1/ai-generate';
 
-type Msg = { role: "assistant" | "user" | "meta"; text: string; ts: number };
-
-const initialAssistant =
-  "Hi — let's get started building your idea! I'm wired to an edge function. You can test it with the Ping Edge button. How should I talk to you? Say: Explain like I'm 5 (very simple), Intermediate, or Developer.";
+function ChipRow({
+  items,
+  onChoose
+}: {
+  items: string[];
+  onChoose: (s: string) => void;
+}) {
+  if (!items?.length) return null;
+  return (
+    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+      {items.map((s) => (
+        <button
+          key={s}
+          onClick={() => onChoose(s)}
+          style={{
+            borderRadius: 16,
+            padding: '6px 12px',
+            border: '1px solid #d0d7de',
+            background: '#f6f8fa',
+            cursor: 'pointer'
+          }}
+        >
+          {s}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 export default function Chat() {
-  const [messages, setMessages] = useState<Msg[]>([
-    { role: "assistant", text: initialAssistant, ts: Date.now() },
+  const [messages, setMessages] = React.useState<ChatMessage[]>([
+    {
+      role: 'assistant',
+      text:
+        "Hi — let's get started building your idea! I'm wired to an edge function. You can test it with the Ping Edge button. How should I talk to you? Say: Explain like I'm 5 (very simple), Intermediate, or Developer.",
+      ts: Date.now()
+    }
   ]);
-  const [answers, setAnswers] = useState<Partial<Envelope["extracted"]>>({});
-  const [pending, setPending] = useState(false);
-  const [input, setInput] = useState("");
-  const [lastEnv, setLastEnv] = useState<Envelope | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [answers, setAnswers] = React.useState(EMPTY_EXTRACTED);
+  const [lastEnv, setLastEnv] = React.useState<Envelope | null>(null);
+  const [input, setInput] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const listRef = React.useRef<HTMLDivElement>(null);
 
-  // Chips come from the last envelope suggestions
-  const chips = useMemo(() => lastEnv?.suggestions ?? [], [lastEnv]);
+  React.useEffect(() => {
+    listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' });
+  }, [messages, lastEnv]);
 
-  async function pingEdge() {
-    const res = await fetch(EDGE_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: "ping" }),
-    }).catch(() => null);
-    const ok = !!res && res.ok;
-    const text = ok ? await res!.text() : "Ping error";
+  async function onPing() {
+    const data = await callEdgePing(EDGE);
     setMessages((m) => [
       ...m,
-      { role: "meta", text: `Endpoint: ${EDGE_URL} Ping → ${text}`, ts: Date.now() },
+      { role: 'assistant', text: `Endpoint: ${EDGE} Ping → ${JSON.stringify(data)}`, ts: Date.now() }
     ]);
   }
 
-  useEffect(() => {
-    // show next question as placeholder (avoid double-asking in bubbles)
-    if (lastEnv?.status?.next_question) {
-      inputRef.current?.setAttribute("placeholder", lastEnv.status.next_question);
-    }
-  }, [lastEnv?.status?.next_question]);
+  function addUserTurn(text: string) {
+    setMessages((m) => [...m, { role: 'user', text, ts: Date.now() }]);
+  }
 
-  async function sendText(s: string) {
-    if (!s.trim() || pending) return;
-    setInput("");
-    setMessages((m) => [...m, { role: "user", text: s, ts: Date.now() }]);
-    setPending(true);
-
+  async function sendPrompt(text: string) {
+    if (!text.trim() || busy) return;
+    addUserTurn(text);
+    setInput('');
+    setBusy(true);
     try {
-      const res = await fetch(EDGE_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "chat", prompt: s }),
-      });
-      const data = (await res.json()) as EdgeReply;
-      if (!("success" in data) || !data.success) {
-        const msg = (data as any)?.message || "edge error";
-        setMessages((m) => [...m, { role: "meta", text: `Error: ${msg}`, ts: Date.now() }]);
-        return;
-      }
-      if (data.mode === "ping") {
+      const data = await callEdgeChat(EDGE, text, answers);
+      if (!('success' in data) || data.success !== true || data.mode !== 'chat') {
         setMessages((m) => [
           ...m,
-          { role: "meta", text: `Ping → ${JSON.stringify(data)}`, ts: Date.now() },
+          { role: 'assistant', text: `Error talking to AI: ${'error' in data ? data.error : 'unknown'}`, ts: Date.now() }
         ]);
+        setBusy(false);
         return;
       }
-      // CHAT - data now contains the fields directly
-      const env = {
+
+      // Envelope built from top-level fields
+      const env: Envelope = {
         reply_to_user: (data as any).reply_to_user,
         extracted: (data as any).extracted,
         status: (data as any).status,
-        suggestions: (data as any).suggestions
+        suggestions: (data as any).suggestions || []
       };
       setLastEnv(env);
 
-      // show conversational reply only (no extra question bubble)
-      setMessages((m) => [...m, { role: "assistant", text: env.reply_to_user, ts: Date.now() }]);
+      // show only the conversational turn (no extra client question)
+      setMessages((m) => [...m, { role: 'assistant', text: env.reply_to_user, ts: Date.now() }]);
 
-      // reflect extracted snapshot
-      setAnswers(env.extracted);
-      try {
-        localStorage.setItem("cp_answers_v2", JSON.stringify(env.extracted));
-      } catch {}
-
-      // if complete, add closing prompt
-      if (env.status.complete) {
-        setMessages((m) => [
-          ...m,
-          {
-            role: "assistant",
-            text:
-              "I've got everything I need. Would you like me to draft the roadmap now, or review the summary first?",
-            ts: Date.now(),
-          },
-        ]);
-      }
+      // merge answers (one-way, never overwrite with nulls)
+      setAnswers((prev) => mergeExtracted(prev, env.extracted));
     } catch (err: any) {
       setMessages((m) => [
         ...m,
-        { role: "meta", text: `Error talking to AI: ${err?.message || "unknown"}`, ts: Date.now() },
+        { role: 'assistant', text: `Error talking to AI: ${err?.message || String(err)}`, ts: Date.now() }
       ]);
     } finally {
-      setPending(false);
+      setBusy(false);
     }
   }
 
+  function handleChipPick(s: string) {
+    // send the chip as if the user typed it
+    void sendPrompt(s);
+  }
+
+  // tone starter chips if tone still missing
+  const starterToneChips =
+    !answers.tone
+      ? ["Explain like I'm 5", 'Intermediate', 'Developer']
+      : [];
+
+  // render suggestions directly under the last assistant message
+  const activeChips = (lastEnv?.suggestions || []).slice(0, 6);
+
   return (
-    <div className="p-4 space-y-3">
-      <div className="flex gap-2">
-        <button onClick={() => window.location.reload()} className="px-3 py-1 border rounded">
-          Refresh
-        </button>
-        <button
-          onClick={() => {
-            setMessages([{ role: "assistant", text: initialAssistant, ts: Date.now() }]);
-            setLastEnv(null);
-            setAnswers({});
-          }}
-          className="px-3 py-1 border rounded"
-        >
-          Reset
-        </button>
-        <button onClick={pingEdge} className="px-3 py-1 border rounded">
-          Ping Edge
-        </button>
+    <div style={{ display: 'grid', gridTemplateRows: 'auto 1fr auto', height: '100%', gap: 8 }}>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={onPing}>Ping Edge</button>
+        <div style={{ fontSize: 12, color: '#6e7781', alignSelf: 'center' }}>Endpoint: {EDGE}</div>
       </div>
 
-      {/* Chips row — from last suggestions */}
-      {chips.length > 0 && (
-        <div className="flex flex-wrap gap-2">
-          {chips.map((c, i) => (
-            <button
-              key={i}
-              className="px-3 py-1 rounded-full border hover:bg-gray-50"
-              onClick={() => sendText(c)}
-            >
-              {c}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Messages */}
-      <div className="space-y-2">
+      <div ref={listRef} style={{ overflowY: 'auto', padding: 8, border: '1px solid #e5e7eb', borderRadius: 8 }}>
         {messages.map((m, i) => (
-          <div
-            key={i}
-            className={
-              m.role === "user"
-                ? "ml-auto max-w-[80%] bg-blue-600 text-white px-3 py-2 rounded-2xl"
-                : m.role === "assistant"
-                ? "max-w-[80%] bg-gray-100 px-3 py-2 rounded-2xl"
-                : "text-xs text-gray-500"
-            }
-          >
-            {m.text}
+          <div key={m.ts + i} style={{ margin: '8px 0', display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
+            <div
+              style={{
+                maxWidth: '80%',
+                padding: '10px 12px',
+                borderRadius: 12,
+                background: m.role === 'user' ? '#2563eb' : '#f3f4f6',
+                color: m.role === 'user' ? 'white' : 'black',
+                whiteSpace: 'pre-wrap'
+              }}
+            >
+              {m.text}
+            </div>
           </div>
         ))}
+
+        {/* chips under the latest assistant turn */}
+        <ChipRow items={starterToneChips} onChoose={handleChipPick} />
+        <ChipRow items={activeChips} onChoose={handleChipPick} />
+
+        {/* tiny Answers pill for live memory */}
+        <div style={{ marginTop: 10, fontSize: 12, color: '#6b7280' }}>
+          Answers: {JSON.stringify(answers)}
+        </div>
       </div>
 
-      {/* Answers snapshot */}
-      <div className="text-xs text-gray-500">
-        Answers: {JSON.stringify(answers)}
-      </div>
-
-      {/* Composer */}
-      <div className="flex gap-2">
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void sendPrompt(input);
+        }}
+        style={{ display: 'flex', gap: 8 }}
+      >
         <input
-          ref={inputRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => (e.key === "Enter" ? sendText(input) : undefined)}
           placeholder="Type your message…"
-          className="flex-1 border rounded px-3 py-2"
+          style={{ flex: 1, padding: '10px 12px', borderRadius: 8, border: '1px solid #e5e7eb' }}
         />
-        <button
-          disabled={pending}
-          onClick={() => sendText(input)}
-          className="px-3 py-2 border rounded"
-        >
-          {pending ? "…" : "Send"}
+        <button disabled={busy} type="submit">
+          {busy ? 'Sending…' : 'Send'}
         </button>
-      </div>
+      </form>
     </div>
   );
 }
