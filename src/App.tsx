@@ -8,6 +8,7 @@ import { AuthGate } from "@/components/AuthGate";
 import Index from "./pages/Index";
 import Auth from "./pages/Auth";
 import Dashboard from "./pages/Dashboard";
+import Chat from "./pages/Chat";
 import Roadmap from "./pages/Roadmap";
 import Health from "./pages/Health";
 import NotFound from "./pages/NotFound";
@@ -26,6 +27,7 @@ const App = () => (
               <Route path="/" element={<Index />} />
               <Route path="/auth" element={<Auth />} />
               <Route path="/dashboard" element={<Dashboard />} />
+              <Route path="/chat" element={<Chat />} />
               <Route path="/roadmap" element={<Roadmap />} />
               <Route path="/health" element={<Health />} />
               <Route path="/self-test" element={<Health />} />
