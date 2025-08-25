@@ -1,53 +1,40 @@
 /**
- * Minimal client for our Supabase Edge function.
- * Always POST JSON and expect JSON back.
+ * Client helper to call our edge function safely.
+ * Guarantees JSON-or-throw (translates 404/HTML into a readable error).
  */
-export type EdgeMode = "ping" | "chat";
-export type EdgeReply =
-  | { success: true; mode: EdgeMode; reply?: string; [k: string]: any }
-  | { success: false; error: string };
+const BASE = import.meta.env.VITE_SUPABASE_URL;
+const EDGE = `${BASE}/functions/v1/ai-generate`;
 
-const url = import.meta.env.VITE_SUPABASE_URL;
-const anon = import.meta.env.VITE_SUPABASE_ANON_KEY;
+export type Level = "ELI5" | "Intermediate" | "Developer";
 
-if (!url || !anon) {
-  // Surface this early in UI; caller can show it nicely.
-  console.warn("Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY");
-}
-
-const endpoint = `${url}/functions/v1/ai-generate`;
-
-export async function callEdge(prompt: string, mode: EdgeMode = "chat"): Promise<EdgeReply & { raw?: string; status?: number; endpoint: string }> {
-  try {
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${anon}`,
-        apikey: anon,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ mode, prompt }),
-    });
-
-    const status = res.status;
-    const raw = await res.text();
-
-    // 404/HTML guard
-    if (!res.ok) {
-      return { success: false, error: `Edge returned ${status}`, raw, status, endpoint };
-    }
-    // JSON parse guard
-    try {
-      const json = JSON.parse(raw);
-      return { ...json, raw, status, endpoint };
-    } catch {
-      return { success: false, error: "Non-JSON from edge", raw, status, endpoint };
-    }
-  } catch (err: any) {
-    return { success: false, error: String(err?.message || err), endpoint };
+export async function callEdge(
+  prompt: string,
+  mode: "chat" | "nlu" | "ping" = "chat",
+  ctx?: { level?: Level; answers?: Record<string, unknown>; transcript?: Array<{role:"user"|"assistant"; content:string}> }
+) {
+  if (mode === "ping") {
+    const r = await fetch(`${EDGE}?mode=ping`, { method: "GET" });
+    if (!r.ok) throw new Error(`Edge ${r.status}`);
+    return await r.json();
   }
-}
 
-export function edgeInfo() {
-  return { endpoint, url, hasKeys: Boolean(url && anon) };
+  const r = await fetch(EDGE, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "apikey": import.meta.env.VITE_SUPABASE_ANON_KEY,
+      "Authorization": `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+    },
+    body: JSON.stringify({ mode, prompt, context: ctx ?? {} }),
+  });
+
+  // Convert non-JSON to readable error so UI never crashes
+  const text = await r.text();
+  try {
+    const json = JSON.parse(text);
+    if (!r.ok) throw new Error(json?.error || `Edge ${r.status}`);
+    return json;
+  } catch {
+    throw new Error(`Non-JSON from edge (status ${r.status}): ${text.slice(0, 160)}`);
+  }
 }

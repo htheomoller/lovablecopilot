@@ -1,193 +1,160 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import QuickChips from "@/components/QuickChips";
-import { Intake, Tone, FEATURE_LIBRARY, nextMissingField, summarizeIntake } from "@/lib/intakeTypes";
-import { callEdge } from "@/lib/ai"; // existing helper
+import { callEdge, type Level } from "@/lib/ai";
 
 type Msg = { role: "assistant" | "user" | "system"; text: string; ts: number };
+type Answers = Partial<{
+  level: Level;
+  idea: string;
+  name: string;
+  audience: string;
+  features: string[];
+  privacy: "Private" | "Share via link" | "Public";
+  auth: "Google OAuth" | "Magic email link" | "None (dev only)";
+}>;
 
-const START_GREETING =
-  "Hi — let's get started building your idea! I'm wired to an edge function. You can test it with the Ping Edge button. How should I talk to you? Say: Explain like I'm 5 (very simple), Intermediate, or Developer.";
+const LEVELS: {label:string; value:Level}[] = [
+  { label: "Explain like I'm 5", value: "ELI5" },
+  { label: "Intermediate", value: "Intermediate" },
+  { label: "Developer", value: "Developer" },
+];
+
+const FEATURE_BLURBS = [
+  "Generate roadmap", "Draft PRD", "Code health checks", "Setup auth", "Image processing", "Payments",
+];
 
 export default function Chat() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [intake, setIntake] = useState<Intake>(() => {
-    try { return JSON.parse(localStorage.getItem("cp_intake_v1") || "{}"); } catch { return {}; }
+  const [answers, setAnswers] = useState<Answers>(() => {
+    try { return JSON.parse(localStorage.getItem("cp_answers_v2") || "{}"); } catch { return {}; }
   });
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const [busy, setBusy] = useState(false);
 
-  const missing = useMemo(() => nextMissingField(intake), [intake]);
+  const transcript = useMemo(
+    () => messages.filter(m => m.role !== "system").map(m => ({ role: m.role as "user"|"assistant", content: m.text })),
+    [messages]
+  );
 
   useEffect(() => {
-    if (messages.length === 0) {
-      setMessages([{ role: "assistant", text: START_GREETING, ts: Date.now() }]);
-    }
+    const hello: Msg = {
+      role: "assistant",
+      ts: Date.now(),
+      text: `Hi — let's get started building your idea! I'm wired to an edge function. You can test it with the Ping Edge button. How should I talk to you? Say: Explain like I'm 5 (very simple), Intermediate, or Developer.`,
+    };
+    setMessages([hello]);
   }, []);
 
-  useEffect(() => {
-    try { localStorage.setItem("cp_intake_v1", JSON.stringify(intake)); } catch {}
-  }, [intake]);
+  function setLevel(l: Level) {
+    setAnswers(a => {
+      const next = { ...a, level: l };
+      localStorage.setItem("cp_answers_v2", JSON.stringify(next));
+      return next;
+    });
+    setMessages(m => [...m, { role: "assistant", ts: Date.now(), text: `Got it — I'll keep it ${l === "ELI5" ? "very simple" : l === "Intermediate" ? "practical" : "technical and concise"}. What's your app idea in one short line?`, }]);
+  }
 
-  useEffect(() => {
-    scrollRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, busy]);
-
-  async function sendText(say: string) {
-    const trimmed = say.trim();
-    if (!trimmed) return;
-    setInput("");
-    setMessages(m => [...m, { role: "user", text: trimmed, ts: Date.now() }]);
-
-    // Light client-side routing to fill intake
-    const lower = trimmed.toLowerCase();
-
-    // Tone
-    if (!intake.tone && ["explain like i'm 5", "eli5", "simple"].some(k => lower.includes(k))) {
-      updateIntake({ tone: "Explain like I'm 5" }); return;
-    }
-    if (!intake.tone && lower.includes("intermediate")) { updateIntake({ tone: "Intermediate" }); return; }
-    if (!intake.tone && lower.includes("developer")) { updateIntake({ tone: "Developer" }); return; }
-
-    // Name helper
-    if (!intake.name && /^name[:\s]/i.test(trimmed)) {
-      const proposed = trimmed.replace(/^name[:\s]*/i, "").trim();
-      if (proposed) { updateIntake({ name: proposed }); return; }
-    }
-
-    // Feature list (comma separated)
-    if (!intake.features?.length && trimmed.includes(",")) {
-      const feats = trimmed.split(",").map(s => s.trim()).filter(Boolean).slice(0, 8);
-      if (feats.length) { updateIntake({ features: feats }); return; }
-    }
-
-    // Otherwise, ask edge to chat back (still baseline echo or your current AI)
+  async function onPing() {
     try {
-      setBusy(true);
-      const data = await callEdge(trimmed, "chat");
-      const reply = data.success ? (data.reply ?? "…") : `Error: ${data.error}`;
-      setMessages(m => [...m, { role: "assistant", text: reply, ts: Date.now() }]);
-    } catch (err: any) {
-      setMessages(m => [...m, { role: "assistant", text: `Error talking to AI: ${err?.message || err}`, ts: Date.now() }]);
+      const res = await callEdge("", "ping");
+      setMessages(m => [...m, { role: "assistant", ts: Date.now(), text: `Ping → ${JSON.stringify(res)}`, }]);
+    } catch (e:any) {
+      setMessages(m => [...m, { role: "assistant", ts: Date.now(), text: `Ping error: ${e.message}`, }]);
+    }
+  }
+
+  async function sendLine(line?: string) {
+    const say = (line ?? input).trim();
+    if (!say) return;
+    setInput("");
+    setMessages(m => [...m, { role: "user", ts: Date.now(), text: say }]);
+    setBusy(true);
+    try {
+      // First: LLM conversation reply (chat)
+      const chat = await callEdge(say, "chat", { level: answers.level ?? "ELI5", transcript });
+      if (chat?.reply) {
+        setMessages(m => [...m, { role: "assistant", ts: Date.now(), text: chat.reply }]);
+      }
+      // Second: NLU to capture structured fields (no heuristics)
+      const nlu = await callEdge(say, "nlu", { level: answers.level ?? "ELI5", answers, transcript });
+      const next: Answers = { ...answers, ...(nlu?.fields || {}) };
+      setAnswers(next);
+      try { localStorage.setItem("cp_answers_v2", JSON.stringify(next)); } catch {}
+      // If follow-up exists, ask it (unless chat already covered it)
+      if (nlu?.follow_up) {
+        setMessages(m => [...m, { role: "assistant", ts: Date.now(), text: nlu.follow_up }]);
+      }
+    } catch (e:any) {
+      setMessages(m => [...m, { role: "assistant", ts: Date.now(), text: `Error talking to AI: ${e.message}` }]);
     } finally {
       setBusy(false);
     }
   }
 
-  function updateIntake(patch: Partial<Intake>) {
-    setIntake(prev => {
-      const next = { ...prev, ...patch };
-      const need = nextMissingField(next);
-
-      const followUps: string[] = [];
-      if (patch.tone) followUps.push(`Got it — I'll keep it ${patch.tone === "Explain like I'm 5" ? "very simple" : patch.tone.toLowerCase()}.`);
-      if (patch.idea) followUps.push(`Noted your idea.`);
-      if (patch.name) followUps.push(`Great — I'll use "${patch.name}" as a working name (easy to change later).`);
-      if (patch.audience) followUps.push(`Nice — audience captured.`);
-      if (patch.features) followUps.push(`Features captured: ${patch.features.join(", ")}.`);
-
-      // Ask next missing field or move to review
-      if (need === "idea") followUps.push("What's your app idea in one short line?");
-      if (need === "name") followUps.push("Do you have a name? If not, say “invent one” or type one.");
-      if (need === "audience") followUps.push("Who is it for? (your ideal user/customer)");
-      if (need === "features") followUps.push("Pick 2–5 must‑have features below or type a comma‑separated list.");
-
-      if (!need) {
-        followUps.push("Nice — I have what I need. Here's a quick summary. If everything looks right, hit “Confirm summary”, or say what to change.");
-      }
-
-      setMessages(m => [...m, { role: "assistant", text: followUps.join(" "), ts: Date.now() }]);
-      return next;
-    });
-  }
-
-  function pickTone(t: Tone) { if (!intake.tone) updateIntake({ tone: t }); }
-  function toggleFeature(f: string) {
-    setIntake(prev => {
-      const set = new Set(prev.features || []);
-      set.has(f) ? set.delete(f) : set.add(f);
-      return { ...prev, features: Array.from(set).slice(0, 8) };
-    });
-  }
-
-  function confirmSummary() {
-    setMessages(m => [...m, { role: "assistant", text: "Awesome — summary confirmed. Next up: I can draft a roadmap. Want me to generate it now, or edit the summary first?", ts: Date.now() }]);
-  }
-
   return (
-    <div className="p-4 max-w-3xl mx-auto">
-      <div className="mb-4">
-        <button className="px-3 py-1 border rounded" onClick={() => window.location.reload()}>Refresh</button>
+    <div className="max-w-3xl mx-auto p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <button onClick={() => window.location.reload()} className="px-3 py-1 rounded border">Refresh</button>
+        <button onClick={() => { localStorage.removeItem("cp_answers_v2"); setAnswers({}); setMessages([]); setTimeout(()=>window.location.reload(), 20); }} className="px-3 py-1 rounded border">Reset</button>
+        <button onClick={onPing} className="px-3 py-1 rounded border">Ping Edge</button>
       </div>
 
-      <div className="space-y-3">
+      {/* Level quick-replies */}
+      {!answers.level && (
+        <div className="flex flex-wrap gap-2">
+          {LEVELS.map(l => (
+            <button key={l.value} onClick={() => setLevel(l.value)} className="px-2 py-1 rounded-full border text-sm">
+              {l.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Feature blurbs */}
+      <div className="flex flex-wrap gap-2">
+        {FEATURE_BLURBS.map(b => (
+          <button
+            key={b}
+            className="px-2 py-1 rounded-full border text-sm"
+            onClick={() => {
+              const next = { ...(answers.features ? { features: [...new Set([...(answers.features ?? []), b])] } : { features: [b] }) };
+              setAnswers(a => {
+                const merged = { ...a, ...next };
+                localStorage.setItem("cp_answers_v2", JSON.stringify(merged));
+                return merged;
+              });
+              setMessages(m => [...m, { role: "assistant", ts: Date.now(), text: `Noted: added feature "${b}". What else?` }]);
+            }}
+          >
+            {b}
+          </button>
+        ))}
+      </div>
+
+      {/* Transcript */}
+      <div className="space-y-2">
         {messages.map((m, i) => (
-          <div key={i} className={m.role === "user" ? "text-right" : ""}>
-            <div className={`inline-block px-3 py-2 rounded ${m.role === "user" ? "bg-primary text-primary-foreground" : "bg-muted"}`}>
-              {m.text}
-            </div>
+          <div key={i} className={m.role === "user" ? "bg-gray-50 rounded p-2" : "bg-white border rounded p-2"}>
+            {m.text}
           </div>
         ))}
-
-        {/* Tone chips when tone is missing */}
-        {!intake.tone && (
-          <div>
-            <div className="text-sm text-muted-foreground mt-1">Choose a style:</div>
-            <QuickChips
-              options={["Explain like I'm 5", "Intermediate", "Developer"]}
-              onPick={(v) => pickTone(v as Tone)}
-            />
-          </div>
-        )}
-
-        {/* Features chips when features are missing */}
-        {intake.tone && intake.idea && intake.name && intake.audience && (!intake.features || intake.features.length < 2) && (
-          <div>
-            <div className="text-sm text-muted-foreground">Quick picks (toggle):</div>
-            <div className="flex flex-wrap gap-2 mt-2">
-              {FEATURE_LIBRARY.map((f) => {
-                const on = (intake.features || []).includes(f);
-                return (
-                  <button
-                    key={f}
-                    type="button"
-                    onClick={() => toggleFeature(f)}
-                    className={`px-3 py-1 rounded-full border text-sm ${on ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}
-                  >
-                    {f}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* Summary & confirm */}
-        {nextMissingField(intake) === null && (
-          <div className="mt-3">
-            <div className="text-sm font-medium mb-1">Summary</div>
-            <pre className="bg-muted p-3 rounded text-sm whitespace-pre-wrap">{summarizeIntake(intake)}</pre>
-            <div className="flex gap-2 mt-2">
-              <button className="px-3 py-1 border rounded" onClick={confirmSummary}>Confirm summary</button>
-              <button className="px-3 py-1 border rounded" onClick={() => setIntake({})}>Start over</button>
-            </div>
-          </div>
-        )}
-
-        {busy && <div className="text-sm text-muted-foreground">…thinking</div>}
-        <div ref={scrollRef} />
+        {busy && <div className="text-sm text-gray-500">…thinking</div>}
       </div>
 
-      {/* Input */}
-      <div className="mt-4 flex gap-2">
+      {/* Compose */}
+      <div className="flex gap-2">
         <input
           value={input}
           onChange={e => setInput(e.target.value)}
-          onKeyDown={e => (e.key === "Enter" ? sendText(input) : undefined)}
-          placeholder={missing === "idea" ? "One‑line idea…" : "Type your message…"}
-          className="flex-1 px-3 py-2 border rounded"
+          onKeyDown={e => e.key === "Enter" ? sendLine() : undefined}
+          placeholder="Type your message…"
+          className="flex-1 border rounded px-3 py-2"
         />
-        <button className="px-3 py-2 border rounded" onClick={() => sendText(input)}>Send</button>
+        <button onClick={() => sendLine()} className="px-3 py-2 rounded border">Send</button>
+      </div>
+
+      {/* Debug footer */}
+      <div className="text-xs text-gray-500 pt-2">
+        Answers: {JSON.stringify(answers)}
       </div>
     </div>
   );
