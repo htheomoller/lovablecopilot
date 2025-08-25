@@ -1,192 +1,158 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-/** CORS */
+/**
+	•	Minimal, robust Edge Function for Copilot
+	•	Modes:
+	•		•	ping: health check (no OpenAI)
+	•		•	chat: natural conversational reply (OpenAI)
+	•		•	extract: conversation + structured JSON envelope (OpenAI)
+	•	
+	•	Requires env:
+	•		•	OPENAI_API_KEY
+	•	Optional:
+	•		•	OPENAI_CHAT_MODEL (default: gpt-4o-mini)
+*/
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST,OPTIONS",
+  "Access-Control-Allow-Methods": "POST,OPTIONS"
 };
 
-type Answers = {
-  tone?: "ELI5" | "Intermediate" | "Developer";
-  idea?: string;
-  // future fields: name, audience, features, privacy, auth, etc.
+type Extracted = {
+  tone: "eli5" | "intermediate" | "developer" | null;
+  idea: string | null;
+  name: string | null;
+  audience: string | null;
+  features: string[];
+  privacy: "Private" | "Share via link" | "Public" | null;
+  auth: "Google OAuth" | "Magic email link" | "None (dev only)" | null;
+  deep_work_hours: "0.5" | "1" | "2" | "4+" | null;
 };
 
-type ChatReq = {
-  mode?: "chat" | "ping";
-  message?: string;
-  state?: string | null;
-  answers?: Answers | null;
+type Payload = {
+  mode?: "ping" | "chat" | "extract";
+  prompt?: string;
+  answers?: Partial<Extracted>;
+  tone?: "eli5" | "intermediate" | "developer";
 };
 
-type ChatRes = {
-  success: true;
-  state: string;
-  prompt: string;
-  answers: Answers;
-  ui?: {
-    chips?: string[];
-    hint?: string;
-  };
-} | {
-  success: false;
-  error: string;
-};
+const SYSTEM_PROMPT = `
+You are Lovable Copilot, a friendly expert that onboards a user's app idea via natural conversation. Respond warmly and clearly; never feel like a rigid form.
+Objectives:
+	•	Converse naturally and adapt to the user's tone preference: "eli5", "intermediate", or "developer". Default to "intermediate" if unknown.
+	•	Quietly extract these fields as the chat progresses: tone, idea, name, audience, features[], privacy, auth, deep_work_hours.
+	•	Never ask for info already captured; if the user changes a value, acknowledge and update it.
+	•	Treat vague placeholders ("I don't know", "TBD", "later") as null and ask a gentle follow-up later; never store such literals.
+	•	When everything (except tone) is filled, summarize in a brief, bullet-free paragraph and ask for confirmation to proceed.
+	•	Stay on topic (app building). Redirect if asked for unrelated/harmful content.
 
-/** Helpers */
-function json(body: unknown, init: ResponseInit = {}) {
-  return new Response(JSON.stringify(body), {
+You MUST return ONLY a single JSON object with this shape:
+{
+  "reply_to_user": "string",
+  "extracted": {
+    "tone": "eli5|intermediate|developer|null",
+    "idea": "string|null",
+    "name": "string|null",
+    "audience": "string|null",
+    "features": ["string", …], // [] if none
+    "privacy": "Private|Share via link|Public|null",
+    "auth": "Google OAuth|Magic email link|None (dev only)|null",
+    "deep_work_hours": "0.5|1|2|4+|null"
+  },
+  "status": {
+    "complete": true|false, // true only when all extracted fields EXCEPT tone are non-null/non-empty
+    "missing": ["field", …], // the remaining keys to obtain
+    "next_question": "string" // one friendly question aimed at the most important missing piece
+  },
+  "suggestions": ["short chip", …] // optional quick-reply chips relevant to next_question
+}
+
+Rules:
+	•	Output must be valid JSON: no markdown, no comments, no extra text.
+	•	Keep "features" concise strings; avoid long sentences there.
+	•	Use the user's current partial state (provided separately) as the single source of truth for what is already known.
+`.trim();
+
+async function openAIChat(messages: any[], maxTokens = 600) {
+  const apiKey = Deno.env.get("OPENAI_API_KEY");
+  if (!apiKey) throw new Error("OPENAI_API_KEY is not set");
+  const model = Deno.env.get("OPENAI_CHAT_MODEL") || "gpt-4o-mini";
+
+  const r = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ model, messages, max_completion_tokens: maxTokens })
+  });
+
+  if (!r.ok) {
+    const t = await r.text();
+    throw new Error(`OpenAI upstream error: ${t}`);
+  }
+  const j = await r.json();
+  const text = j?.choices?.[0]?.message?.content ?? "";
+  return String(text);
+}
+
+function json(data: unknown, init: ResponseInit = {}) {
+  return new Response(JSON.stringify(data), {
     ...init,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    headers: { ...corsHeaders, "Content-Type": "application/json" }
   });
 }
 
-function normalize(s: string | undefined | null): string {
-  return (s ?? "").toString().trim();
-}
-
-function normalizeTone(s: string): Answers["tone"] | null {
-  const t = s.toLowerCase();
-  if (t.includes("explain like i'm 5") || t.includes("explain like im 5") || t === "eli5" || t.includes("very simple") || t === "simple") return "ELI5";
-  if (t.includes("intermediate") || t.includes("normal")) return "Intermediate";
-  if (t.includes("developer") || t.includes("dev") || t.includes("technical")) return "Developer";
-  return null;
-}
-
-/** Prompts by state */
-function promptFor(state: string, answers: Answers): { prompt: string; chips?: string[]; hint?: string } {
-  switch (state) {
-    case "ASK_TONE":
-      return {
-        prompt: "How should I talk to you? Say: Explain like I'm 5 (very simple), Intermediate, or Developer.",
-        chips: ["Explain like I'm 5", "Intermediate", "Developer"],
-      };
-    case "ASK_IDEA":
-      return {
-        prompt: "What's your app idea in one short line?",
-        chips: ["Photo restoration app", "Task manager", "AI assistant for builders"],
-        hint: "Keep it short — one sentence is perfect.",
-      };
-    default:
-      return { prompt: "What's next?" };
-  }
-}
-
-/** Next-state engine (minimal for now: tone → idea) */
-function advance(state: string, message: string, answers: Answers): { state: string; answers: Answers; understood: boolean } {
-  const msg = normalize(message);
-  const current = state || "ASK_TONE";
-
-  if (current === "ASK_TONE") {
-    const tone = normalizeTone(msg);
-    if (tone) {
-      const nextAnswers = { ...answers, tone };
-      return { state: "ASK_IDEA", answers: nextAnswers, understood: true };
-    }
-    return { state: "ASK_TONE", answers, understood: false };
-  }
-
-  if (current === "ASK_IDEA") {
-    if (msg.length >= 3) {
-      const nextAnswers = { ...answers, idea: msg };
-      // stop here for now; a later patch can add ASK_AUDIENCE etc.
-      return { state: "CONFIRM_SUMMARY", answers: nextAnswers, understood: true };
-    }
-    return { state: "ASK_IDEA", answers, understood: false };
-  }
-
-  // Fallback: keep current state
-  return { state: current, answers, understood: false };
-}
-
 serve(async (req: Request) => {
-  // CORS preflight
-  if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: corsHeaders });
-  }
-
-  // Content-type guard for POST
-  if (req.method !== "POST") {
-    return json({ success: false, error: "Use POST with JSON" }, { status: 405 });
-  }
-  const ct = req.headers.get("content-type") || "";
-  if (!ct.includes("application/json")) {
-    return json({ success: false, error: "Expected JSON body" }, { status: 400 });
-  }
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
-    const body = (await req.json()) as ChatReq | null;
-    const mode = body?.mode ?? "chat";
+    const { mode = "chat", prompt = "", answers = {}, tone }: Payload = await req.json().catch(() => ({}));
 
-    // Health check
     if (mode === "ping") {
       return json({ success: true, mode: "ping", reply: "pong" });
     }
 
-    // Chat flow
-    const incomingState = body?.state || "";
-    const incomingAnswers: Answers = { ...(body?.answers || {}) };
-    const message = normalize(body?.message);
+    if (mode === "chat") {
+      const userTone = tone || (answers.tone as any) || "intermediate";
+      const sys = `${SYSTEM_PROMPT}\n\nReturn the JSON envelope described above.\nTone to use: ${userTone}`;
+      const messages = [
+        { role: "system", content: sys },
+        { role: "user", content: `User said: "${prompt}"\nCurrent extracted (may be partial): ${JSON.stringify(answers || {})}` }
+      ];
 
-    // Bootstrap state
-    const state0 = incomingState || "ASK_TONE";
+      const raw = await openAIChat(messages, 700);
 
-    // If no message and no answers.tone yet, just ask for tone
-    if (!message && state0 === "ASK_TONE" && !incomingAnswers.tone) {
-      const p = promptFor("ASK_TONE", incomingAnswers);
-      return json({
-        success: true,
-        state: "ASK_TONE",
-        prompt: p.prompt,
-        answers: incomingAnswers,
-        ui: { chips: p.chips, hint: p.hint },
-      } as ChatRes);
+      // Try strict JSON parse; if it fails, provide a guarded error with the raw text for debugging
+      try {
+        const parsed = JSON.parse(raw);
+        return json({ success: true, mode: "chat", ...parsed });
+      } catch {
+        // As a fallback, still respond but mark parse_error to help the client surface it
+        return json({ success: true, mode: "chat", parse_error: true, raw });
+      }
     }
 
-    // Advance state machine
-    const { state: state1, answers: answers1, understood } = advance(state0, message, incomingAnswers);
+    if (mode === "extract") {
+      // Same as chat, but the client expects strictly the JSON envelope
+      const userTone = tone || (answers.tone as any) || "intermediate";
+      const sys = `${SYSTEM_PROMPT}\n\nReturn the JSON envelope described above.\nTone to use: ${userTone}`;
+      const messages = [
+        { role: "system", content: sys },
+        { role: "user", content: `User said: "${prompt}"\nCurrent extracted (may be partial): ${JSON.stringify(answers || {})}` }
+      ];
 
-    // If we just set tone → move to ASK_IDEA with the right prompt
-    if (state1 === "ASK_IDEA") {
-      const p = promptFor("ASK_IDEA", answers1);
-      return json({
-        success: true,
-        state: "ASK_IDEA",
-        prompt: understood ? `Got it — I'll keep it very ${answers1.tone === "ELI5" ? "simple" : answers1.tone === "Developer" ? "technical" : "clear"}. ${p.prompt}` : promptFor("ASK_TONE", answers1).prompt,
-        answers: answers1,
-        ui: { chips: p.chips, hint: p.hint },
-      } as ChatRes);
+      const raw = await openAIChat(messages, 700);
+      try {
+        const parsed = JSON.parse(raw);
+        return json({ success: true, mode: "extract", ...parsed });
+      } catch (e) {
+        return json({ success: false, mode: "extract", error: "model_returned_non_json", raw }, { status: 502 });
+      }
     }
 
-    // If idea captured, show a brief summary and stop (later steps can extend this)
-    if (state1 === "CONFIRM_SUMMARY") {
-      const tone = answers1.tone ?? "ELI5";
-      const summary = `Summary so far:\n• Tone: ${tone}\n• Idea: ${answers1.idea}`;
-      return json({
-        success: true,
-        state: "CONFIRM_SUMMARY",
-        prompt: `${summary}\nDoes this look right? Say "yes" to continue or type a change.`,
-        answers: answers1,
-        ui: { chips: ["Yes", "Change tone", "Edit idea"] },
-      } as ChatRes);
-    }
+    // Unknown mode
+    return json({ success: false, error: `unknown_mode: ${mode}` }, { status: 400 });
 
-    // If not understood, repeat the correct question (no dead-end)
-    const p = promptFor(state1, answers1);
-    const repeat = state1 === "ASK_TONE"
-      ? `I didn't catch that tone. Please choose: Explain like I'm 5, Intermediate, or Developer.`
-      : `I didn't catch that. ${p.prompt}`;
-    return json({
-      success: true,
-      state: state1,
-      prompt: repeat,
-      answers: answers1,
-      ui: { chips: p.chips, hint: p.hint },
-    } as ChatRes);
-
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return json({ success: false, error: msg }, { status: 500 });
+  } catch (err: any) {
+    return json({ success: false, error: err?.message || String(err) }, { status: 500 });
   }
 });

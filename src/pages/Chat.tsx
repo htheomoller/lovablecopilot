@@ -4,14 +4,24 @@ import { Chip } from "@/components/ui/chip";
 
 type Msg = { role: "assistant" | "user"; text: string; ts: number };
 
+type ExtractedData = {
+  tone: "eli5" | "intermediate" | "developer" | null;
+  idea: string | null;
+  name: string | null;
+  audience: string | null;
+  features: string[];
+  privacy: "Private" | "Share via link" | "Public" | null;
+  auth: "Google OAuth" | "Magic email link" | "None (dev only)" | null;
+  deep_work_hours: "0.5" | "1" | "2" | "4+" | null;
+};
+
 export default function Chat() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  const [projectId, setProjectId] = useState<string>();
-  const [currentState, setCurrentState] = useState<string>("");
-  const [answers, setAnswers] = useState<Record<string, any>>({});
-  const [chips, setChips] = useState<string[]>([]);
+  const [extractedData, setExtractedData] = useState<Partial<ExtractedData>>({});
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [isComplete, setIsComplete] = useState(false);
 
   useEffect(() => {
     // Load initial conversation state
@@ -20,31 +30,32 @@ export default function Chat() {
 
   async function loadInitialState() {
     try {
-      const response = await callConversationAPI("");
+      const response = await callConversationAPI("Hi! I'd like to build an app.", {});
       if (response.success) {
         const hello: Msg = {
           role: "assistant",
           ts: Date.now(),
-          text: response.prompt,
+          text: response.reply_to_user,
         };
         setMessages([hello]);
-        setCurrentState(response.state);
-        setAnswers(response.answers);
-        setChips(response.ui?.chips || []);
+        setExtractedData(response.extracted || {});
+        setSuggestions(response.suggestions || []);
+        setIsComplete(response.status?.complete || false);
       }
     } catch (e: any) {
       const hello: Msg = {
         role: "assistant",
         ts: Date.now(),
-        text: "Hi! Let's build your idea together. How should I talk to you?",
+        text: "Hi! Let's build your app idea together. How should I talk to you?",
       };
       setMessages([hello]);
+      setSuggestions(["Explain like I'm 5", "Intermediate", "Developer"]);
     }
   }
 
   async function onPing() {
     try {
-      const res = await callConversationAPI("", "", {}, "ping");
+      const res = await callConversationAPI("", {}, undefined, "ping");
       setMessages(m => [...m, { role: "assistant", ts: Date.now(), text: `Ping → ${JSON.stringify(res)}` }]);
     } catch (e: any) {
       setMessages(m => [...m, { role: "assistant", ts: Date.now(), text: `Ping error: ${e.message}` }]);
@@ -60,15 +71,19 @@ export default function Chat() {
     setBusy(true);
     
     try {
-      const response = await callConversationAPI(say, currentState, answers);
+      const response = await callConversationAPI(say, extractedData, extractedData.tone);
       
       if (response.success) {
-        setMessages(m => [...m, { role: "assistant", ts: Date.now(), text: response.prompt }]);
-        
-        // Update state
-        setCurrentState(response.state);
-        setAnswers(response.answers);
-        setChips(response.ui?.chips || []);
+        if (response.parse_error) {
+          setMessages(m => [...m, { role: "assistant", ts: Date.now(), text: `Parse error. Raw response: ${response.raw}` }]);
+        } else {
+          setMessages(m => [...m, { role: "assistant", ts: Date.now(), text: response.reply_to_user }]);
+          
+          // Update extracted data
+          setExtractedData(response.extracted || {});
+          setSuggestions(response.suggestions || []);
+          setIsComplete(response.status?.complete || false);
+        }
       } else {
         throw new Error(response.error);
       }
@@ -96,10 +111,9 @@ export default function Chat() {
         <button 
           onClick={() => {
             setMessages([]);
-            setProjectId(undefined);
-            setCurrentState("");
-            setAnswers({});
-            setChips([]);
+            setExtractedData({});
+            setSuggestions([]);
+            setIsComplete(false);
             setTimeout(() => window.location.reload(), 20);
           }} 
           className="px-3 py-1 rounded border hover:bg-muted"
@@ -112,6 +126,11 @@ export default function Chat() {
         >
           Ping Edge
         </button>
+        {isComplete && (
+          <div className="px-3 py-1 rounded bg-green-100 text-green-800 text-sm">
+            Complete!
+          </div>
+        )}
       </div>
 
       {/* Messages */}
@@ -132,18 +151,18 @@ export default function Chat() {
         {busy && <div className="text-sm text-muted-foreground">…thinking</div>}
       </div>
 
-      {/* Quick chips */}
-      {chips.length > 0 && (
+      {/* Quick suggestions */}
+      {suggestions.length > 0 && (
         <div className="space-y-2">
           <div className="text-sm text-muted-foreground">Quick options:</div>
           <div className="flex flex-wrap gap-2">
-            {chips.map((chip, index) => (
+            {suggestions.map((suggestion, index) => (
               <Chip
                 key={index}
-                onClick={() => handleChipClick(chip)}
+                onClick={() => handleChipClick(suggestion)}
                 className="cursor-pointer"
               >
-                {chip}
+                {suggestion}
               </Chip>
             ))}
           </div>
@@ -169,9 +188,8 @@ export default function Chat() {
 
       {/* Debug info */}
       <div className="text-xs text-muted-foreground space-y-1">
-        <div>State: {currentState}</div>
-        <div>Project: {projectId || "session"}</div>
-        <div>Answers: {JSON.stringify(answers)}</div>
+        <div>Extracted: {JSON.stringify(extractedData)}</div>
+        <div>Complete: {isComplete.toString()}</div>
       </div>
     </div>
   );

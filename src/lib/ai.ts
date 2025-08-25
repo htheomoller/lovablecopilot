@@ -1,21 +1,26 @@
 /**
- * Client helper to call the structured conversation edge function
+ * Client helper to call the OpenAI-powered conversation edge function
  */
 const BASE = "https://yjfqfnmrsdfbvlyursdi.supabase.co";
 const EDGE = `${BASE}/functions/v1/ai-generate`;
 
-export async function callConversationAPI(
-  message: string = "",
-  state?: string,
-  answers?: any,
-  mode: "ping" | "chat" = "chat"
-) {
-  if (mode === "ping") {
-    const r = await fetch(`${EDGE}?mode=ping`, { method: "GET" });
-    if (!r.ok) throw new Error(`Edge ${r.status}`);
-    return await r.json();
-  }
+type ExtractedData = {
+  tone: "eli5" | "intermediate" | "developer" | null;
+  idea: string | null;
+  name: string | null;
+  audience: string | null;
+  features: string[];
+  privacy: "Private" | "Share via link" | "Public" | null;
+  auth: "Google OAuth" | "Magic email link" | "None (dev only)" | null;
+  deep_work_hours: "0.5" | "1" | "2" | "4+" | null;
+};
 
+export async function callConversationAPI(
+  prompt: string = "",
+  answers: Partial<ExtractedData> = {},
+  tone?: "eli5" | "intermediate" | "developer",
+  mode: "ping" | "chat" | "extract" = "chat"
+) {
   const r = await fetch(EDGE, {
     method: "POST",
     headers: {
@@ -24,10 +29,10 @@ export async function callConversationAPI(
       "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlqZnFmbm1yc2RmYnZseXVyc2RpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTU5Mjk2MDQsImV4cCI6MjA3MTUwNTYwNH0.gPkkIglRw7yz7z-XWB0ZOTfWb9jlOZkt_2wCRT4q_gQ",
     },
     body: JSON.stringify({ 
-      mode, 
-      message,
-      state,
-      answers
+      mode,
+      prompt,
+      answers,
+      tone
     }),
   });
 
