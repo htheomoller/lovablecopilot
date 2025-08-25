@@ -61,7 +61,7 @@ serve(async (req: Request) => {
       return new Response(JSON.stringify({ success: false, error: "invalid_content_type" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
-    const { mode = "chat", prompt = "" } = await req.json();
+    const { mode = "nlu", prompt = "" } = await req.json();
 
     if (mode === "nlu") {
       const res = nluExtract(prompt);
@@ -69,7 +69,7 @@ serve(async (req: Request) => {
     }
 
     // baseline echo
-    return new Response(JSON.stringify({ success: true, mode: "chat", reply: `Baseline echo: "${prompt}"` }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({ success: true, mode: "nlu", reply: `Baseline echo: "${prompt}"` }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return new Response(JSON.stringify({ success: false, error: msg }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });

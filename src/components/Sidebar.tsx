@@ -12,9 +12,6 @@ export default function Sidebar() {
           Dashboard
         </NavLink>
         {/*__NAV__*/}
-        <NavLink to="/chat" className="block px-3 py-2 rounded hover:bg-muted">
-          Chat
-        </NavLink>
         <NavLink to="/roadmap" className="block px-3 py-2 rounded hover:bg-muted">
           Roadmap
         </NavLink>

@@ -54,9 +54,9 @@ Deno.serve(async (req) => {
         owner_id: user.id
       },
       {
-        id: `seed-chat-${timestamp}`,
+        id: `seed-features-${timestamp}`,
         project: 'CoPilot', 
-        name: 'Chat Onboarding',
+        name: 'Feature Development',
         status: 'pending',
         start_date: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 7 days from now
         duration_days: 7,

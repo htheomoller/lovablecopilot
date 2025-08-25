@@ -20,7 +20,7 @@ export function shapeMilestones(answers: Record<string, string>, ownerId: string
     {
       id: `setup-${milestoneId}`,
       owner_id: ownerId,
-      name: 'Setup & Auth',
+      name: 'Project Setup',
       project: projectName,
       status: 'in_progress',
       start_date: today.toISOString().split('T')[0],
@@ -29,7 +29,7 @@ export function shapeMilestones(answers: Record<string, string>, ownerId: string
     {
       id: `onboarding-${milestoneId}`,
       owner_id: ownerId,
-      name: 'Chat Onboarding',
+      name: 'Feature Development',
       project: projectName,
       status: 'pending',
       start_date: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
