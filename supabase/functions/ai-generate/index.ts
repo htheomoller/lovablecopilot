@@ -15,8 +15,10 @@ const openai = new OpenAI({ apiKey: Deno.env.get("OPENAI_API_KEY") });
 
 type ChatRequest = {
   mode?: "chat" | "ping";
-  prompt?: string;              // latest user message
-  snapshot?: Extracted | null;  // client-side snapshot memory
+  prompt?: string;              // legacy: latest user message
+  snapshot?: Extracted | null;  // legacy: client-side snapshot memory
+  messages?: Array<{ role: string; content: string }>;  // new: full conversation history
+  answers?: Extracted | null;   // new: authoritative snapshot
   model?: string;               // optional override
 };
 
@@ -32,8 +34,21 @@ serve(async (req) => {
 
   if (body.mode === "ping") return json({ success: true, mode: "ping", reply: "pong" });
 
-  const userText = (body.prompt ?? "").trim();
-  const snapshot: Extracted | null = body.snapshot ?? null;
+  // Handle both legacy and new payload formats
+  let userText: string;
+  let snapshot: Extracted | null;
+  
+  if (body.messages && body.answers !== undefined) {
+    // New format: extract latest user message from messages array
+    const lastUserMsg = body.messages.filter(m => m.role === "user").pop();
+    userText = (lastUserMsg?.content ?? "").trim();
+    snapshot = body.answers;
+  } else {
+    // Legacy format
+    userText = (body.prompt ?? "").trim();
+    snapshot = body.snapshot ?? null;
+  }
+  
   const model = body.model ?? "gpt-4o-mini";
 
   if (!userText) {

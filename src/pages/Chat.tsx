@@ -1,4 +1,7 @@
-import React from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+
+type Role = "user" | "assistant" | "system";
+type Msg = { role: Role; text: string; ts: number };
 
 type Extracted = {
   tone: "eli5" | "intermediate" | "developer" | null;
@@ -14,68 +17,97 @@ type Extracted = {
 type Envelope = {
   reply_to_user: string;
   extracted: Extracted;
-  status: { complete: boolean; missing: Array<keyof Extracted>; next_question: string };
+  status: {
+    complete: boolean;
+    missing: string[];
+    next_question: string;
+  };
   suggestions: string[];
 };
 
-const initialSnapshot: Extracted = {
-  tone: null, idea: null, name: null, audience: null, features: [], privacy: null, auth: null, deep_work_hours: null,
+const initialExtracted: Extracted = {
+  tone: null, idea: null, name: null, audience: null,
+  features: [], privacy: null, auth: null, deep_work_hours: null
 };
 
 export default function Chat() {
-  const [endpoint] = React.useState(
-    `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-generate`
-  );
-  const [messages, setMessages] = React.useState<Array<{ role: "user" | "assistant"; text: string }>>([]);
-  const [input, setInput] = React.useState("");
-  const [snapshot, setSnapshot] = React.useState(initialSnapshot);
-  const [chips, setChips] = React.useState<string[]>([]);
-  const [busy, setBusy] = React.useState(false);
+  const [messages, setMessages] = useState<Msg[]>([
+    { role: "assistant", text: "Hi — let's get started building your idea! I'm wired to an edge function. You can test it with Ping Edge. How should I talk to you? Say: Explain like I'm 5 (very simple), Intermediate, or Developer.", ts: Date.now() }
+  ]);
+  const [answers, setAnswers] = useState<Extracted>(initialExtracted);
+  const [chips, setChips] = useState<string[]>([]);
+  const [endpoint] = useState<string>(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-generate`);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
 
-  async function send(text: string) {
-    if (!text.trim()) return;
-    setMessages((m) => [...m, { role: "user", text }]);
+  // Helper: push a message
+  const push = (role: Role, text: string) =>
+    setMessages(m => [...m, { role, text, ts: Date.now() }]);
+
+  // Send chat to edge
+  const ask = async (userText: string) => {
+    if (!userText.trim()) return;
+    push("user", userText);
     setBusy(true);
     try {
       const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "chat", prompt: text, snapshot }),
+        body: JSON.stringify({
+          mode: "chat",
+          // full history for style + continuity
+          messages: messages.concat([{ role: "user", text: userText, ts: Date.now() }]).map(m => ({ role: m.role, content: m.text })),
+          // authoritative snapshot the model must respect
+          answers
+        })
       });
-      const data = await res.json();
-      if (!res.ok || !data?.success) throw new Error(data?.message || "AI error");
 
-      const env: Envelope = {
-        reply_to_user: data.reply_to_user,
-        extracted: data.extracted,
-        status: data.status,
-        suggestions: data.suggestions ?? [],
-      };
+      const data = await res.json() as Envelope | { success?: boolean; error?: string; message?: string };
+      // Defensive: if wrapped, unwrap
+      const env: Envelope = (data as any).reply_to_user
+        ? data as Envelope
+        : (data as any).envelope;
 
-      setMessages((m) => [...m, { role: "assistant", text: env.reply_to_user }]);
-      setSnapshot(env.extracted);
-      setChips(Array.isArray(env.suggestions) ? env.suggestions.slice(0, 5) : []);
-    } catch (e: any) {
-      setMessages((m) => [...m, { role: "assistant", text: `Error talking to AI: ${e?.message || e}` }]);
+      if (!env || !env.reply_to_user) {
+        throw new Error("Invalid AI envelope");
+      }
+
+      // Render exactly one assistant bubble: reply_to_user
+      push("assistant", env.reply_to_user);
+
+      // Update memory snapshot + chips
+      setAnswers(env.extracted ?? answers);
+      setChips(Array.isArray(env.suggestions) ? env.suggestions.slice(0, 6) : []);
+
+    } catch (err: any) {
+      push("assistant", `Sorry — I hit an error talking to AI: ${err?.message ?? String(err)}`);
     } finally {
       setBusy(false);
     }
-  }
+  };
 
-  function onChip(c: string) {
-    setInput(c);
-    void send(c);
-    setInput("");
-  }
+  // Chip click becomes exact user message
+  const onChip = (s: string) => ask(s);
+
+  // Submit
+  const onSubmit: React.FormEventHandler<HTMLFormElement> = (e) => {
+    e.preventDefault();
+    if (!inputRef.current) return;
+    const v = inputRef.current.value;
+    inputRef.current.value = "";
+    ask(v);
+  };
 
   return (
-    <div className="max-w-4xl mx-auto p-4 space-y-4">
-      <div className="text-sm text-muted-foreground">Endpoint: {endpoint}</div>
+    <div className="mx-auto max-w-3xl p-4 space-y-3">
+      <div className="text-xs text-gray-500">Endpoint: {endpoint}</div>
 
       <div className="space-y-2">
         {messages.map((m, i) => (
-          <div key={i} className={m.role === "user" ? "text-right" : ""}>
-            <div className={`inline-block rounded-2xl px-3 py-2 ${m.role === "user" ? "bg-blue-600 text-white" : "bg-gray-100"}`}>
+          <div key={i} className={m.role === "user" ? "text-right" : "text-left"}>
+            <div
+              className={`inline-block rounded-2xl px-4 py-2 ${m.role === "user" ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-900"}`}
+            >
               {m.text}
             </div>
           </div>
@@ -83,12 +115,12 @@ export default function Chat() {
       </div>
 
       {chips.length > 0 && (
-        <div className="flex flex-wrap gap-2 pt-2">
-          {chips.map((c, i) => (
+        <div className="flex flex-wrap gap-2">
+          {chips.map((c, idx) => (
             <button
-              key={i}
+              key={idx}
               onClick={() => onChip(c)}
-              className="px-3 py-1 rounded-full bg-gray-200 hover:bg-gray-300 text-sm"
+              className="rounded-full border px-3 py-1 text-sm hover:bg-gray-50"
               disabled={busy}
             >
               {c}
@@ -97,21 +129,20 @@ export default function Chat() {
         </div>
       )}
 
-      <form
-        onSubmit={(e) => { e.preventDefault(); const t = input; setInput(""); void send(t); }}
-        className="flex gap-2 pt-2"
-      >
+      <form onSubmit={onSubmit} className="flex gap-2 pt-2">
         <input
-          className="flex-1 border rounded-lg px-3 py-2"
-          placeholder="Type your message…"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
+          ref={inputRef}
           disabled={busy}
+          placeholder="Type your message…"
+          className="flex-1 rounded-md border px-3 py-2"
         />
-        <button className="px-4 py-2 rounded-lg bg-black text-white disabled:opacity-50" disabled={busy}>Send</button>
+        <button className="rounded-md bg-black text-white px-4 py-2" disabled={busy}>Send</button>
       </form>
 
-      <div className="text-xs text-gray-400">Answers: {JSON.stringify(snapshot)}</div>
+      <details className="text-xs text-gray-500 pt-2">
+        <summary>Answers (debug)</summary>
+        <pre className="whitespace-pre-wrap">{JSON.stringify(answers, null, 2)}</pre>
+      </details>
     </div>
   );
 }
