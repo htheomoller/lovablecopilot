@@ -1,73 +1,134 @@
+/**
+ * Edge function: ai-generate
+ * NOTE: This patch tightens the extractor system prompt so the model never
+ * asks duplicate questions. It must put the question ONLY in status.next_question
+ * and keep reply_to_user as an acknowledgement/setup line (no question marks).
+ */
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import OpenAI from "https://esm.sh/openai@4.57.0";
-import { SYSTEM_PROMPT, type Extracted, type Envelope } from "./prompt.ts";
 
-const cors = {
+const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST,OPTIONS",
+} as const;
+
+type Envelope = {
+  reply_to_user: string;
+  extracted: {
+    tone: "eli5" | "intermediate" | "developer" | null;
+    idea: string | null;
+    name: string | null;
+    audience: string | null;
+    features: string[];
+    privacy: "Private" | "Share via link" | "Public" | null;
+    auth: "Google OAuth" | "Magic email link" | "None (dev only)" | null;
+    deep_work_hours: "0.5" | "1" | "2" | "4+" | null;
+  };
+  status: {
+    complete: boolean;
+    missing: Array<
+      | "tone"
+      | "idea"
+      | "name"
+      | "audience"
+      | "features"
+      | "privacy"
+      | "auth"
+      | "deep_work_hours"
+    >;
+    next_question: string | null;
+  };
+  suggestions: string[];
 };
 
-const json = (obj: unknown, status = 200) =>
-  new Response(JSON.stringify(obj), { status, headers: { ...cors, "Content-Type": "application/json" } });
+// — SYSTEM PROMPT (hardened, no duplicate questions) –––––––––––
+const SYSTEM_PROMPT = `
+You are Lovable Copilot, a warm, concise onboarding assistant.
+
+OBJECTIVES
+• Converse naturally but extract project data into the fields below.
+• Never re-ask for a field that is already filled unless the user changes it.
+• Always acknowledge edits like: "Updated the name to X."
+• Default tone to "intermediate" unless the user picks another tone.
+
+FIELDS TO EXTRACT (mirror exactly):
+tone: one of eli5 | intermediate | developer | null
+idea: one-sentence app description or null
+name: project name or null
+audience: target users or null
+features: string[] or []
+privacy: one of Private | Share via link | Public | null
+auth: one of Google OAuth | Magic email link | None (dev only) | null
+deep_work_hours: one of 0.5 | 1 | 2 | 4+ | null
+
+OUTPUT CONTRACT
+Return ONLY a JSON object with:
+• reply_to_user: a short, friendly statement that sets context for the next step.
+IMPORTANT: If you provide status.next_question, DO NOT include any question
+in reply_to_user (no question marks). Keep it as a single sentence like
+"Noted the idea; next we'll identify your audience."
+• extracted: the current snapshot of fields (never store placeholders like "I don't know").
+• status.complete: true only when all fields except tone are filled.
+• status.missing: keys still null/empty.
+• status.next_question: a single clear question aimed at the MOST IMPORTANT
+missing field right now, or null if complete.
+• suggestions: 2–5 SHORT options relevant to the next_question ONLY.
+Examples:
+next_question: "Who is your main audience?"
+suggestions: ["Families", "Photographers", "Everyone"]
+If no obvious options, return [].
+
+POLICIES
+• If user gives a non-answer ("idk", "maybe later"), keep that field null and
+move on to a different missing field. Circle back later.
+• If user changes a filled field, reflect the change and continue.
+• Avoid asking two questions in one turn. Exactly one question lives in
+status.next_question; reply_to_user must not contain a question.
+`.trim();
 
 const openai = new OpenAI({ apiKey: Deno.env.get("OPENAI_API_KEY") });
 
-type ChatRequest = {
-  mode?: "chat" | "ping";
-  prompt?: string;              // legacy: latest user message
-  snapshot?: Extracted | null;  // legacy: client-side snapshot memory
-  messages?: Array<{ role: string; content: string }>;  // new: full conversation history
-  answers?: Extracted | null;   // new: authoritative snapshot
-  model?: string;               // optional override
-};
-
-serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-
-  let body: ChatRequest;
-  try {
-    body = await req.json();
-  } catch {
-    return json({ success: false, error: "bad_request", message: "Expected JSON body" }, 400);
+serve(async (req: Request) => {
+  if (req.method === "OPTIONS") {
+    return new Response("ok", { headers: corsHeaders });
   }
-
-  if (body.mode === "ping") return json({ success: true, mode: "ping", reply: "pong" });
-
-  // Handle both legacy and new payload formats
-  let userText: string;
-  let snapshot: Extracted | null;
-  
-  if (body.messages && body.answers !== undefined) {
-    // New format: extract latest user message from messages array
-    const lastUserMsg = body.messages.filter(m => m.role === "user").pop();
-    userText = (lastUserMsg?.content ?? "").trim();
-    snapshot = body.answers;
-  } else {
-    // Legacy format
-    userText = (body.prompt ?? "").trim();
-    snapshot = body.snapshot ?? null;
-  }
-  
-  const model = body.model ?? "gpt-4o-mini";
-
-  if (!userText) {
-    return json({ success: false, error: "empty_prompt", message: "Missing user prompt" }, 400);
-  }
-
-  const system = { role: "system" as const, content: SYSTEM_PROMPT };
-  const user = {
-    role: "user" as const,
-    content: JSON.stringify({
-      user_utterance: userText,
-      SNAPSHOT: snapshot,
-    }),
-  };
 
   try {
-    // Enforce strict JSON object from the model
+    const ct = req.headers.get("content-type") ?? "";
+    if (!ct.includes("application/json")) {
+      return new Response(
+        JSON.stringify({ success: false, error: "Expected JSON body" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    const { mode = "chat", prompt = "", snapshot = null } = await req.json().catch(() => ({
+      mode: "chat",
+      prompt: "",
+      snapshot: null,
+    }));
+
+    if (mode === "ping") {
+      return new Response(
+        JSON.stringify({ success: true, mode, reply: "pong" }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    // Call the LLM
+    const system = { role: "system" as const, content: SYSTEM_PROMPT };
+    const user = {
+      role: "user" as const,
+      content: JSON.stringify({
+        user_utterance: prompt,
+        SNAPSHOT: snapshot,
+      }),
+    };
+
     const completion = await openai.chat.completions.create({
-      model,
+      model: "gpt-4o-mini",
       temperature: 0.2,
       response_format: { type: "json_object" },
       messages: [system, user],
@@ -76,17 +137,37 @@ serve(async (req) => {
     const text = completion.choices[0]?.message?.content ?? "";
     let env: Envelope;
     try {
-      env = JSON.parse(text) as Envelope;
+      env = JSON.parse(text);
     } catch {
-      // last-resort extraction of the first {...} block
-      const m = text.match(/\{[\s\S]*\}$/);
-      if (!m) throw new Error("Model did not return JSON");
-      env = JSON.parse(m[0]) as Envelope;
+      // If model emitted prose, wrap it safely to avoid frontend crashes
+      env = {
+        reply_to_user:
+          "I noted that. Next, let's capture your app idea in one sentence.",
+        extracted: {
+          tone: null,
+          idea: null,
+          name: null,
+          audience: null,
+          features: [],
+          privacy: null,
+          auth: null,
+          deep_work_hours: null,
+        },
+        status: { complete: false, missing: ["idea"], next_question: "What does your app do?" },
+        suggestions: ["Photo restoration", "Task tracker", "AI coding assistant"],
+      };
     }
 
-    return json({ success: true, mode: "chat", ...env });
+    return new Response(
+      JSON.stringify({ success: true, mode: "chat", ...env }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return json({ success: false, error: "upstream_error", message: msg }, 502);
+    return new Response(JSON.stringify({ success: false, error: msg }), {
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   }
 });
