@@ -69,8 +69,13 @@ export default function Chat() {
         ]);
         return;
       }
-      // CHAT
-      const env = data.envelope;
+      // CHAT - data now contains the fields directly
+      const env = {
+        reply_to_user: (data as any).reply_to_user,
+        extracted: (data as any).extracted,
+        status: (data as any).status,
+        suggestions: (data as any).suggestions
+      };
       setLastEnv(env);
 
       // show conversational reply only (no extra question bubble)

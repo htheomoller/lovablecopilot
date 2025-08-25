@@ -16,5 +16,5 @@ export type Envelope = {
 };
 export type EdgeReply =
   | { success: true; mode: "ping"; reply: string }
-  | { success: true; mode: "chat"; envelope: Envelope }
+  | ({ success: true; mode: "chat" } & Envelope)
   | { success: false; error: string; message: string; details?: unknown };
