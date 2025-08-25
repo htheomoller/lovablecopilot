@@ -1,0 +1,10 @@
+Edge returns JSON (no envelope):
+{
+  "success": true,
+  "mode": "chat",
+  "reply_to_user": "string",
+  "extracted": { ...Extracted },
+  "status": { "complete": boolean, "missing": string[], "next_question": string | null },
+  "suggestions": string[]
+}
+On error: { "success": false, "error": "string", "message"?: "string" }

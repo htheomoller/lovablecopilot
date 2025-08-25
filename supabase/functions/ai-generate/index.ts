@@ -117,7 +117,7 @@ serve(async (req: Request) => {
       );
     }
 
-    // Call the LLM
+    // Call the LLM with snapshot for memory
     const system = { role: "system" as const, content: SYSTEM_PROMPT };
     const user = {
       role: "user" as const,
@@ -159,7 +159,14 @@ serve(async (req: Request) => {
     }
 
     return new Response(
-      JSON.stringify({ success: true, mode: "chat", ...env }),
+      JSON.stringify({ 
+        success: true, 
+        mode: "chat", 
+        reply_to_user: env.reply_to_user,
+        extracted: env.extracted,
+        status: env.status,
+        suggestions: env.suggestions
+      }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
 
