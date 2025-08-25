@@ -1,56 +1,68 @@
-export type Extracted = {
-  tone: "eli5" | "intermediate" | "developer" | null;
-  idea: string | null;
-  name: string | null;
-  audience: string | null;
-  features: string[];
-  privacy: "Private" | "Share via link" | "Public" | null;
-  auth: "Google OAuth" | "Magic email link" | "None (dev only)" | null;
-  deep_work_hours: "0.5" | "1" | "2" | "4+" | null;
+export type EdgeResult =
+  | { success: true; mode: string; reply?: string; raw?: string; data?: unknown }
+  | { success: false; error: string; message: string; details?: unknown };
+
+const endpointFromEnv = () => {
+  const url = import.meta.env.VITE_SUPABASE_URL;
+  if (!url) return null;
+  return `${url.replace(/\/$/, "")}/functions/v1/ai-generate`;
 };
 
-export type Envelope = {
-  reply_to_user: string;
-  extracted: Extracted;
-  status: {
-    complete: boolean;
-    missing: string[];
-    next_question: string;
-  };
-  suggestions: string[];
-};
+export async function callEdge(payload: Record<string, unknown>) {
+  const endpoint = endpointFromEnv();
+  const finalEndpoint = endpoint || "/functions/v1/ai-generate";
 
-const ENDPOINT = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-generate`;
-
-async function callEdge(payload: any) {
-  const res = await fetch(ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", apikey: import.meta.env.VITE_SUPABASE_ANON_KEY },
-    body: JSON.stringify(payload),
-  });
-  const text = await res.text();
-  let json: any = null;
+  let res: Response;
   try {
-    json = JSON.parse(text);
-  } catch {
-    throw new Error(`Non-JSON from edge (status ${res.status}): ${text}`);
+    res = await fetch(finalEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload ?? {})
+    });
+  } catch (e: any) {
+    return {
+      ok: false,
+      status: 0,
+      endpoint: finalEndpoint,
+      error: "network_error",
+      message: e?.message || String(e)
+    };
   }
-  if (!res.ok) throw new Error(json?.error || `Edge error ${res.status}`);
-  return json;
+
+  const raw = await res.text();
+  if (!res.ok) {
+    // Non‑JSON HTML or gateway error? Return raw to surface in UI
+    return {
+      ok: false,
+      status: res.status,
+      endpoint: finalEndpoint,
+      error: "edge_non_200",
+      raw
+    };
+  }
+
+  try {
+    const json = JSON.parse(raw) as EdgeResult;
+    return { ok: true, status: res.status, endpoint: finalEndpoint, ...json, raw };
+  } catch {
+    return {
+      ok: false,
+      status: res.status,
+      endpoint: finalEndpoint,
+      error: "edge_invalid_json",
+      raw
+    };
+  }
 }
 
-export async function aiChat(prompt: string, mode: "chat" | "extract" = "chat", answers?: Partial<Extracted>) {
-  const data = await callEdge({ mode, prompt, answers });
-  if (data?.envelope) return data.envelope as Envelope;
+export async function edgePing() {
+  return callEdge({ mode: "ping" });
+}
 
-  // graceful fallback when edge couldn't parse the LLM output
-  return {
-    reply_to_user: data?.reply ?? "Thanks — tell me a bit more and I'll keep going.",
-    extracted: {
-      tone: null, idea: null, name: null, audience: null, features: [],
-      privacy: null, auth: null, deep_work_hours: null
-    },
-    status: { complete: false, missing: ["idea"], next_question: "What's your app idea in one short line?" },
-    suggestions: [],
-  } as Envelope;
+export async function edgeChat(prompt: string, system?: string) {
+  return callEdge({ mode: "chat", prompt, system });
+}
+
+export async function edgeExtract(userText: string, extractorSystemPrompt: string) {
+  return callEdge({ mode: "extract", prompt: userText, system: extractorSystemPrompt });
 }

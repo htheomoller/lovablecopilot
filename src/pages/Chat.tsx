@@ -1,110 +1,176 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { aiChat, type Envelope, type Extracted } from "@/lib/ai";
+import { edgePing, edgeChat, edgeExtract } from "@/lib/ai";
 
-type Msg = { role: "user" | "assistant"; text: string; ts: number };
+type Msg = { role: "assistant" | "user" | "system"; text: string; ts: number };
+type Answers = {
+  tone: "eli5" | "intermediate" | "developer" | null;
+  idea: string | null;
+  name: string | null;
+  audience: string | null;
+  features: string[];
+  privacy: "Private" | "Share via link" | "Public" | null;
+  auth: "Google OAuth" | "Magic email link" | "None (dev only)" | null;
+  deep_work_hours: "0.5" | "1" | "2" | "4+" | null;
+};
 
-function loadAnswers(): Extracted {
-  try { return JSON.parse(localStorage.getItem("cp_answers_v2") || ""); } catch { /* noop */ }
-  return { tone: null, idea: null, name: null, audience: null, features: [], privacy: null, auth: null, deep_work_hours: null };
+const EXTRACTOR_SPEC = `
+You are Lovable Copilot. Always output ONLY a single JSON object with this shape:
+{
+  "reply_to_user": "string",
+  "extracted": {
+    "tone": "eli5|intermediate|developer|null",
+    "idea": "string|null",
+    "name": "string|null",
+    "audience": "string|null",
+    "features": "string[]",
+    "privacy": "Private|Share via link|Public|null",
+    "auth": "Google OAuth|Magic email link|None (dev only)|null",
+    "deep_work_hours": "0.5|1|2|4+|null"
+  },
+  "status": {
+    "complete": "boolean",
+    "missing": "string[]",
+    "next_question": "string"
+  },
+  "suggestions": "string[]"
 }
-function saveAnswers(a: Extracted) { try { localStorage.setItem("cp_answers_v2", JSON.stringify(a)); } catch {} }
+Rules:
+	•	Be warm and succinct. Don't sound like a form. No bullet lists.
+	•	Never store literal non-answers like "I don't know"; use null and ask a clarifier later.
+	•	If a field changes, confirm the update in reply_to_user.
+	•	If all required fields (except tone) are filled, summarize in a short paragraph and ask for confirmation.
+`;
+
+function emptyAnswers(): Answers {
+  return {
+    tone: null,
+    idea: null,
+    name: null,
+    audience: null,
+    features: [],
+    privacy: null,
+    auth: null,
+    deep_work_hours: null
+  };
+}
 
 export default function Chat() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
-  const answersRef = useRef(loadAnswers());
-  const [chips, setChips] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [answers, setAnswers] = useState(() => {
+    try {
+      const s = localStorage.getItem("cp_answers_v2");
+      return s ? JSON.parse(s) : emptyAnswers();
+    } catch { return emptyAnswers(); }
+  });
 
   useEffect(() => {
-    setMessages([{
-      role: "assistant",
-      text: "Hi — let's get started building your idea! I'm wired to an edge function. You can test it with the Ping Edge button. How should I talk to you? Say: Explain like I'm 5 (very simple), Intermediate, or Developer.",
-      ts: Date.now(),
-    }]);
-    setChips(["Explain like I'm 5", "Intermediate", "Developer"]);
+    if (messages.length === 0) {
+      setMessages([
+        { role: "assistant", text: "Hi — let's get started building your idea! I'm wired to an edge function. You can test it with the Ping Edge button. How should I talk to you? Say: Explain like I'm 5 (very simple), Intermediate, or Developer.", ts: Date.now() }
+      ]);
+    }
   }, []);
 
-  async function turn(userText: string) {
-    const now = Date.now();
-    setMessages(m => [...m, { role: "user", text: userText, ts: now }]);
-    setBusy(true);
-    try {
-      const toneMap: Record<string, Extracted["tone"]> = {
-        "explain like i'm 5": "eli5",
-        "eli5": "eli5",
-        "intermediate": "intermediate",
-        "developer": "developer",
-      };
-      // If user picked a tone, prefer "extract" mode with prior state.
-      const chosenTone = toneMap[userText.trim().toLowerCase()];
-      const env: Envelope = await aiChat(userText, "extract", answersRef.current);
+  useEffect(() => {
+    try { localStorage.setItem("cp_answers_v2", JSON.stringify(answers)); } catch {}
+  }, [answers]);
 
-      // merge extracted into our local snapshot (respecting null/[] per schema)
-      const merged: Extracted = { ...answersRef.current, ...env.extracted };
-      // handle explicit tone choice
-      if (chosenTone) merged.tone = chosenTone;
+  async function onPing() {
+    setErr(null);
+    const r = await edgePing();
+    if (!(r as any).ok) {
+      setErr(`Ping error: ${(r as any).error || "unknown"} ${String((r as any).status || "")}`);
+      return;
+    }
+    const last = (r as any).raw || JSON.stringify(r);
+    setMessages(m => [...m, { role: "assistant", text: `Endpoint: ${(r as any).endpoint}\nPing → ok:${(r as any).ok} status:${(r as any).status} reply:${(r as any).raw || ""}`, ts: Date.now() }]);
+  }
 
-      answersRef.current = merged;
-      saveAnswers(merged);
+  async function send() {
+    const say = input.trim();
+    if (!say) return;
+    setInput("");
+    setErr(null);
+    setMessages(m => [...m, { role: "user", text: say, ts: Date.now() }]);
 
-      setMessages(m => [...m, { role: "assistant", text: env.reply_to_user, ts: Date.now() }]);
-      setChips(env.suggestions || []);
-    } catch (e: any) {
-      setMessages(m => [...m, { role: "assistant", text: `Error talking to AI: ${e.message || e}`, ts: Date.now() }]);
-    } finally {
-      setBusy(false);
+    // Use extractor mode for all onboarding turns
+    const r = await edgeExtract(say, EXTRACTOR_SPEC);
+
+    if (!(r as any).ok) {
+      const e = r as any;
+      // surface meaningful errors
+      if (e.error === "missing_openai_key") {
+        setMessages(m => [...m, { role: "assistant", text: "Server is missing OPENAI_API_KEY. Please add it to Supabase Edge Function secrets and redeploy.", ts: Date.now() }]);
+      } else if (e.error === "upstream_error" || e.error === "upstream_invalid_json" || e.error === "edge_non_200") {
+        setMessages(m => [...m, { role: "assistant", text: `Upstream issue. Status: ${e.status || "?"}. Raw: ${e.raw ? String(e.raw).slice(0, 280) : "n/a"}`, ts: Date.now() }]);
+      } else {
+        setMessages(m => [...m, { role: "assistant", text: `Error talking to AI: ${e.error || "unknown"}`, ts: Date.now() }]);
+      }
+      return;
+    }
+
+    const jr = r as any;
+    // Expect { success:true, mode:"extract", data: {...}, raw: "..." }
+    const data = jr?.data;
+    if (!data || typeof data !== "object") {
+      setMessages(m => [...m, { role: "assistant", text: "Parse error: AI did not return the expected JSON envelope.", ts: Date.now() }]);
+      return;
+    }
+
+    const reply = data.reply_to_user ?? "(no reply)";
+    const extracted = data.extracted ?? {};
+    const nextAnswers: Answers = {
+      tone: extracted.tone ?? answers.tone ?? null,
+      idea: extracted.idea ?? answers.idea ?? null,
+      name: extracted.name ?? answers.name ?? null,
+      audience: extracted.audience ?? answers.audience ?? null,
+      features: Array.isArray(extracted.features) ? extracted.features : (answers.features ?? []),
+      privacy: extracted.privacy ?? answers.privacy ?? null,
+      auth: extracted.auth ?? answers.auth ?? null,
+      deep_work_hours: extracted.deep_work_hours ?? answers.deep_work_hours ?? null
+    };
+
+    setAnswers(nextAnswers);
+    setMessages(m => [...m, { role: "assistant", text: String(reply), ts: Date.now() }]);
+
+    const nextQ = data?.status?.next_question;
+    const sugg = Array.isArray(data?.suggestions) ? data.suggestions : [];
+    if (nextQ) {
+      setMessages(m => [...m, { role: "assistant", text: nextQ, ts: Date.now() }]);
+      if (sugg.length) {
+        setMessages(m => [...m, { role: "system", text: `Quick options: ${sugg.join(" · ")}`, ts: Date.now() }]);
+      }
     }
   }
 
   return (
     <div className="max-w-3xl mx-auto p-4 space-y-4">
       <div className="flex gap-2">
-        <button className="px-3 py-1 rounded border" onClick={() => window.location.reload()}>Refresh</button>
-        <button
-          className="px-3 py-1 rounded border"
-          onClick={() => {
-            localStorage.removeItem("cp_answers_v2");
-            answersRef.current = {
-              tone: null, idea: null, name: null, audience: null, features: [],
-              privacy: null, auth: null, deep_work_hours: null
-            };
-            setMessages([{ role: "assistant", text: "Reset complete. How should I talk to you? Explain like I'm 5, Intermediate, or Developer?", ts: Date.now() }]);
-            setChips(["Explain like I'm 5", "Intermediate", "Developer"]);
-          }}
-        >
-          Reset
-        </button>
+        <button className="px-3 py-1 rounded border" onClick={onPing}>Ping Edge</button>
+        {err && <div className="text-red-600 text-sm">{err}</div>}
       </div>
 
-      <div className="space-y-2">
+      <div className="space-y-2 bg-white border rounded p-3 min-h-[200px]">
         {messages.map((m, i) => (
-          <div key={i} className={m.role === "assistant" ? "bg-gray-50 p-2 rounded" : "text-right"}>
-            <div className="whitespace-pre-wrap">{m.text}</div>
+          <div key={i} className={m.role === "user" ? "text-right" : "text-left"}>
+            <div className={`inline-block px-3 py-2 rounded ${m.role === "user" ? "bg-blue-50" : m.role === "assistant" ? "bg-gray-50" : "bg-amber-50"}`}>
+              {m.text}
+            </div>
           </div>
         ))}
-        {busy && <div className="text-sm text-gray-500">…thinking</div>}
       </div>
-
-      {!!chips.length && (
-        <div className="flex flex-wrap gap-2">
-          {chips.map((c, i) => (
-            <button key={i} className="px-2 py-1 rounded-full border text-sm" onClick={() => turn(c)}>
-              {c}
-            </button>
-          ))}
-        </div>
-      )}
 
       <div className="flex gap-2">
         <input
+          className="flex-1 border rounded px-3 py-2"
           value={input}
           onChange={e => setInput(e.target.value)}
-          onKeyDown={e => (e.key === "Enter" ? (turn(input.trim()), setInput("")) : null)}
+          onKeyDown={e => e.key === "Enter" ? send() : undefined}
           placeholder="Type your message…"
-          className="flex-1 px-3 py-2 border rounded"
         />
-        <button className="px-3 py-2 border rounded" onClick={() => (turn(input.trim()), setInput(""))}>Send</button>
+        <button className="px-3 py-2 rounded bg-black text-white" onClick={send}>Send</button>
       </div>
     </div>
   );
