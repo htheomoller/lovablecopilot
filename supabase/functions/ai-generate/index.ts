@@ -1,201 +1,164 @@
-/**
- * Copilot Edge Function — strict JSON contract + schema guard + chip suggestions
- * Modes:
- *   • POST {"mode":"ping"} -> {"success":true,"mode":"ping","reply":"pong"}
- *   • POST {"mode":"chat","prompt":"…","projectId?":string} -> JSON envelope
- */
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-type Extracted = {
-  tone: "eli5" | "intermediate" | "developer" | null;
-  idea: string | null;
-  name: string | null;
-  audience: string | null;
-  features: string[];
-  privacy: "Private" | "Share via link" | "Public" | null;
-  auth: "Google OAuth" | "Magic email link" | "None (dev only)" | null;
-  deep_work_hours: "0.5" | "1" | "2" | "4+" | null;
-};
-
-type Envelope = {
-  reply_to_user: string;
-  extracted: Extracted;
-  status: {
-    complete: boolean;
-    missing: Array<keyof Omit<Extracted, "tone"> | "tone">;
-    next_question: string;
-  };
-  suggestions: string[];
-};
-
+/** CORS */
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST,OPTIONS",
+  "Access-Control-Allow-Methods": "POST,OPTIONS"
 };
 
-const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY") ?? "";
-const OPENAI_MODEL =
-  Deno.env.get("OPENAI_MODEL") ??
-  "gpt-4o-mini"; // inexpensive, good quality
+/** ——————————————————————————————————————————————————————————————————————————————————————————————————
+ *   SYSTEM PROMPT (Onboarding Copilot)
+ * ——————————————————————————————————————————————————————————————————————————————————————————————————
+ *   The model must ALWAYS reply with a single valid JSON object matching EXTRACTOR_SPEC.
+ */
+const SYSTEM_ONBOARDER = `
+You are Lovable Copilot, a warm, expert assistant that onboards users to a new app idea through a natural conversation. Be encouraging, adapt to the user's tone, keep memory of filled fields, never store placeholders like "I don't know", and never ask for things already captured unless the user changes them.
 
-// –– Utility: JSON-safe response
-function json200(data: unknown) {
-  return new Response(JSON.stringify(data), {
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
+Objectives:
+ • Converse naturally (not a rigid form).
+ • Quietly extract fields as they appear: tone, idea, name, audience, features, privacy, auth, deep_work_hours.
+ • If a user revises a filled field, acknowledge the change and update it.
+ • Tones must be one of: "eli5", "intermediate", "developer". If none provided, default to "intermediate" for reply style, but keep "tone" null until user states a preference.
+ • For ambiguity or placeholders (e.g., "not sure", "TBD"), set that field to null and ask a friendly clarifying question later.
+ • When all fields (except tone) are complete, summarize in a single, bullet‑free paragraph and ask for confirmation to proceed.
+
+Safety:
+ • Decline topics unrelated to app building; steer back to the project politely.
+
+EXTRACTOR_SPEC (shape you MUST output, and nothing else):
+{
+  "reply_to_user": string,
+  "extracted": {
+    "tone": "eli5" | "intermediate" | "developer" | null,
+    "idea": string | null,
+    "name": string | null,
+    "audience": string | null,
+    "features": string[],   // [] if none
+    "privacy": "Private" | "Share via link" | "Public" | null,
+    "auth": "Google OAuth" | "Magic email link" | "None (dev only)" | null,
+    "deep_work_hours": "0.5" | "1" | "2" | "4+" | null
+  },
+  "status": {
+    "complete": boolean,          // true only when all extracted fields except tone are non-null/non-empty
+    "missing": string[],          // keys still null/empty from extracted
+    "next_question": string       // one clear question that targets one missing field
+  },
+  "suggestions": string[]         // short labels for quick-reply chips relevant to next_question
+}
+
+Output Rules:
+ • You MUST return only one JSON object that strictly matches EXTRACTOR_SPEC.
+ • Never include prose outside JSON.
+ • If parsing user input yields no progress, still respond with a helpful "reply_to_user" and a concrete "next_question" with 2–5 actionable "suggestions".
+ • For privacy/auth/deep_work_hours, prefer suggestions from the allowed sets.
+`;
+
+/** Minimal OpenAI client via fetch */
+const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
+const OPENAI_MODEL = Deno.env.get("OPENAI_MODEL")?.trim() || "gpt-4o-mini";
+const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY") || Deno.env.get("OPENAI_API_KEY_BETA") || "";
+
+/** Helper: JSON response */
+function jsonOk(body: unknown, init: ResponseInit = {}) {
+  return new Response(JSON.stringify(body), {
+    ...init,
+    headers: { ...corsHeaders, "Content-Type": "application/json" }
   });
 }
-function json400(err: string, details: unknown = null) {
-  return new Response(
-    JSON.stringify({ success: false, error: err, message: err, details }),
-    { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-  );
-}
-function json500(err: string, details: unknown = null) {
-  return new Response(
-    JSON.stringify({ success: false, error: "upstream_error", message: err, details }),
-    { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-  );
+
+/** Helper: error response */
+function jsonErr(status: number, message: string, details: unknown = null) {
+  return jsonOk({ success: false, error: "upstream_error", message, details }, { status });
 }
 
-// –– Schema Guard (no deps)
-function isExtracted(x: any): x is Extracted {
-  if (!x || typeof x !== "object") return false;
-  const toneOk =
-    x.tone === null || x.tone === "eli5" || x.tone === "intermediate" || x.tone === "developer";
-  const strOrNull = (v: any) => v === null || typeof v === "string";
-  const featuresOk = Array.isArray(x.features) && x.features.every((s: any) => typeof s === "string");
-  const privacyOk = x.privacy === null || ["Private", "Share via link", "Public"].includes(x.privacy);
-  const authOk =
-    x.auth === null || ["Google OAuth", "Magic email link", "None (dev only)"].includes(x.auth);
-  const hoursOk = x.deep_work_hours === null || ["0.5", "1", "2", "4+"].includes(x.deep_work_hours);
-  return (
-    toneOk &&
-    strOrNull(x.idea) &&
-    strOrNull(x.name) &&
-    strOrNull(x.audience) &&
-    featuresOk &&
-    privacyOk &&
-    authOk &&
-    hoursOk
-  );
-}
-function isEnvelope(e: any): e is Envelope {
-  if (!e || typeof e !== "object") return false;
-  const statusOk =
-    e.status &&
-    typeof e.status === "object" &&
-    typeof e.status.complete === "boolean" &&
-    Array.isArray(e.status.missing) &&
-    typeof e.status.next_question === "string";
-  const suggOk = Array.isArray(e.suggestions) && e.suggestions.every((s: any) => typeof s === "string");
-  return typeof e.reply_to_user === "string" && isExtracted(e.extracted) && statusOk && suggOk;
-}
-// Sanitizer: trim to first question only, dedupe whitespace
-function sanitizeNextQ(q: string): string {
-  const cleaned = (q || "").replace(/\s+/g, " ").trim();
-  const idx = cleaned.indexOf("?");
-  if (idx >= 0) return cleaned.slice(0, idx + 1);
-  return cleaned;
-}
-function clampEnvelope(env: Envelope): Envelope {
-  return {
-    reply_to_user: (env.reply_to_user || "").trim(),
-    extracted: {
-      tone: env.extracted.tone ?? null,
-      idea: env.extracted.idea ?? null,
-      name: env.extracted.name ?? null,
-      audience: env.extracted.audience ?? null,
-      features: Array.isArray(env.extracted.features) ? env.extracted.features.slice(0, 8) : [],
-      privacy: env.extracted.privacy ?? null,
-      auth: env.extracted.auth ?? null,
-      deep_work_hours: env.extracted.deep_work_hours ?? null,
-    },
-    status: {
-      complete: !!env.status.complete,
-      missing: Array.isArray(env.status.missing) ? env.status.missing.slice(0, 12) : [],
-      next_question: sanitizeNextQ(env.status.next_question || ""),
-    },
-    suggestions: Array.isArray(env.suggestions) ? env.suggestions.slice(0, 6) : [],
+/** Call OpenAI with system prompt + user message */
+async function callOnboarder(userText: string) {
+  if (!OPENAI_API_KEY) {
+    throw new Error("Missing OPENAI_API_KEY");
+  }
+  const payload = {
+    model: OPENAI_MODEL,
+    temperature: 0.3,
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: SYSTEM_ONBOARDER },
+      { role: "user", content: userText }
+    ]
   };
-}
-
-// –– System Prompt (Extractor)
-const SYSTEM_PROMPT = `You are Lovable Copilot. Speak warmly and naturally. STRICTLY output a single JSON object that matches the EXTRACTOR SPEC.  Never include extra prose, backticks, or code fences. If the user provides a non-answer like "I don't know" or "later", set that field to null.  Only ONE next_question — a single sentence ending with a question mark. Prefer short, helpful "suggestions" relevant to the next_question (max 6).`;
-
-// –– Spec string injected so the model can follow it verbatim
-const EXTRACTOR_SPEC = `{ "reply_to_user": "string", "extracted": { "tone": "eli5 | intermediate | developer | null", "idea": "string | null", "name": "string | null", "audience": "string | null", "features": "string[]", "privacy": "Private | Share via link | Public | null", "auth": "Google OAuth | Magic email link | None (dev only) | null", "deep_work_hours": "0.5 | 1 | 2 | 4+ | null" }, "status": { "complete": "boolean", "missing": "Array<string>", "next_question": "string // exactly one sentence that ends with '?'" }, "suggestions": "Array<string> // max 6 items" }`;
-
-// –– Upstream call
-async function callOpenAI(user: string) {
-  if (!OPENAI_API_KEY) throw new Error("Missing OPENAI_API_KEY");
-  const content = [
-    { role: "system", content: SYSTEM_PROMPT },
-    { role: "system", content: `EXTRACTOR SPEC:\n${EXTRACTOR_SPEC}` },
-    { role: "user", content: user },
-  ];
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+  const res = await fetch(OPENAI_URL, {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
+      "Content-Type": "application/json"
     },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      temperature: 0.3,
-      response_format: { type: "json_object" },
-      messages: content,
-    }),
+    body: JSON.stringify(payload)
   });
   if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`OpenAI ${res.status}: ${txt}`);
+    const text = await res.text().catch(() => "");
+    throw new Error(`OpenAI ${res.status}: ${text || res.statusText}`);
   }
   const data = await res.json();
-  const raw = data.choices?.[0]?.message?.content ?? "";
-  return String(raw);
+  const raw = data?.choices?.[0]?.message?.content ?? "";
+  return raw;
 }
 
-// –– Request Handler
+/** Ping + Chat handler */
 serve(async (req: Request) => {
+  // Preflight
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
   try {
+    const ct = req.headers.get("content-type") || "";
+    if (!ct.includes("application/json")) {
+      return jsonErr(400, "Expected JSON body");
+    }
+
     const { mode = "chat", prompt = "" } = await req.json().catch(() => ({}));
 
     if (mode === "ping") {
-      return json200({ success: true, mode: "ping", reply: "pong" });
+      return jsonOk({ success: true, mode: "ping", reply: "pong" });
     }
 
-    if (mode !== "chat") return json400("unsupported_mode");
+    if (mode !== "chat") {
+      return jsonErr(400, "Unsupported mode", { mode });
+    }
 
-    // 1) Call LLM
-    const raw = await callOpenAI(String(prompt || ""));
-    // 2) Parse strictly (handle accidental fences)
-    const cleaned = raw.replace(/^```json\s*|\s*```$/g, "").trim();
-    let parsed: unknown;
+    // ---- CHAT with onboarder system prompt
+    const raw = await callOnboarder(String(prompt || "").trim());
+
+    // Try to parse JSON; if it fails, wrap as reply_to_user-only fallback matching the contract
     try {
-      parsed = JSON.parse(cleaned);
+      const parsed = JSON.parse(raw);
+      // Minimal validation: ensure top-level keys exist
+      if (
+        typeof parsed === "object" && parsed &&
+        "reply_to_user" in parsed && "extracted" in parsed && "status" in parsed && "suggestions" in parsed
+      ) {
+        return jsonOk({ success: true, mode: "chat", ...parsed });
+      }
+      // If not matching, coerce into contract
+      return jsonOk({
+        success: true,
+        mode: "chat",
+        reply_to_user: typeof raw === "string" ? raw : "Let's keep going. What would you like to clarify next?",
+        extracted: { tone: null, idea: null, name: null, audience: null, features: [], privacy: null, auth: null, deep_work_hours: null },
+        status: { complete: false, missing: ["idea"], next_question: "What's your app idea in one short line?" },
+        suggestions: ["Photo restoration app", "Recipe planner", "Workout tracker"]
+      });
     } catch {
-      return json400("invalid_json_from_model", { raw });
+      // Parsing failed → still return a valid envelope
+      return jsonOk({
+        success: true,
+        mode: "chat",
+        reply_to_user: typeof raw === "string" && raw.trim() ? raw.trim() : "Got it. What's your app idea in one short line?",
+        extracted: { tone: null, idea: null, name: null, audience: null, features: [], privacy: null, auth: null, deep_work_hours: null },
+        status: { complete: false, missing: ["idea"], next_question: "What's your app idea in one short line?" },
+        suggestions: ["Photo restoration app", "Reading tracker", "Budget buddy"]
+      });
     }
-    // 3) Schema guard + clamp
-    if (!isEnvelope(parsed)) {
-      return json400("invalid_envelope_from_model", { raw, parsed });
-    }
-    const env = clampEnvelope(parsed);
-
-    // Hard rule: ensure exactly one question and never duplicate with reply
-    if (env.status.next_question && env.reply_to_user.includes(env.status.next_question)) {
-      // keep next_question only for UI placeholder/chips; don't duplicate in reply
-      // (no change needed, just a note)
-    }
-
-    return json200({
-      success: true,
-      mode: "chat",
-      envelope: env,
-    });
-  } catch (err: any) {
-    return json500(err?.message || String(err));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return jsonErr(500, msg);
   }
 });
