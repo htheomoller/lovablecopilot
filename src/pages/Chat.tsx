@@ -58,6 +58,7 @@ export default function Chat() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [err, setErr] = useState<string | null>(null);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
   const [answers, setAnswers] = useState(() => {
     try {
       const s = localStorage.getItem("cp_answers_v2");
@@ -70,6 +71,7 @@ export default function Chat() {
       setMessages([
         { role: "assistant", text: "Hi — let's get started building your idea! I'm wired to an edge function. You can test it with the Ping Edge button. How should I talk to you? Say: Explain like I'm 5 (very simple), Intermediate, or Developer.", ts: Date.now() }
       ]);
+      setSuggestions(["Explain like I'm 5", "Intermediate", "Developer"]);
     }
   }, []);
 
@@ -88,8 +90,8 @@ export default function Chat() {
     setMessages(m => [...m, { role: "assistant", text: `Endpoint: ${(r as any).endpoint}\nPing → ok:${(r as any).ok} status:${(r as any).status} reply:${(r as any).raw || ""}`, ts: Date.now() }]);
   }
 
-  async function send() {
-    const say = input.trim();
+  async function send(chipText?: string) {
+    const say = (chipText ?? input).trim();
     if (!say) return;
     setInput("");
     setErr(null);
@@ -108,6 +110,7 @@ export default function Chat() {
       } else {
         setMessages(m => [...m, { role: "assistant", text: `Error talking to AI: ${e.error || "unknown"}`, ts: Date.now() }]);
       }
+      setSuggestions([]);
       return;
     }
 
@@ -116,6 +119,7 @@ export default function Chat() {
     const data = jr?.data;
     if (!data || typeof data !== "object") {
       setMessages(m => [...m, { role: "assistant", text: "Parse error: AI did not return the expected JSON envelope.", ts: Date.now() }]);
+      setSuggestions([]);
       return;
     }
 
@@ -137,12 +141,47 @@ export default function Chat() {
 
     const nextQ = data?.status?.next_question;
     const sugg = Array.isArray(data?.suggestions) ? data.suggestions : [];
+    
+    // Update suggestions state
+    if (sugg.length > 0) {
+      setSuggestions(sugg.slice(0, 6)); // Limit to 6 chips
+    } else if (!nextAnswers.tone) {
+      setSuggestions(["Explain like I'm 5", "Intermediate", "Developer"]);
+    } else {
+      setSuggestions([]);
+    }
+    
     if (nextQ) {
       setMessages(m => [...m, { role: "assistant", text: nextQ, ts: Date.now() }]);
-      if (sugg.length) {
-        setMessages(m => [...m, { role: "system", text: `Quick options: ${sugg.join(" · ")}`, ts: Date.now() }]);
-      }
     }
+  }
+
+  function onChipClick(label: string) {
+    // Map friendly tone labels to internal tokens
+    const normalized = 
+      /^explain like i'?m 5$/i.test(label) ? 'eli5'
+      : /^intermediate$/i.test(label) ? 'intermediate' 
+      : /^developer$/i.test(label) ? 'developer'
+      : label;
+    
+    send(normalized);
+  }
+
+  function QuickChips() {
+    if (!suggestions.length) return null;
+    return (
+      <div className="flex flex-wrap gap-2 mt-2">
+        {suggestions.map((chip, i) => (
+          <button
+            key={`${chip}-${i}`}
+            onClick={() => onChipClick(chip)}
+            className="px-3 py-1 rounded-full border text-sm hover:bg-muted transition-colors"
+          >
+            {chip}
+          </button>
+        ))}
+      </div>
+    );
   }
 
   return (
@@ -162,6 +201,8 @@ export default function Chat() {
         ))}
       </div>
 
+      <QuickChips />
+
       <div className="flex gap-2">
         <input
           className="flex-1 border rounded px-3 py-2"
@@ -170,7 +211,7 @@ export default function Chat() {
           onKeyDown={e => e.key === "Enter" ? send() : undefined}
           placeholder="Type your message…"
         />
-        <button className="px-3 py-2 rounded bg-black text-white" onClick={send}>Send</button>
+        <button className="px-3 py-2 rounded bg-black text-white" onClick={() => send()}>Send</button>
       </div>
     </div>
   );
