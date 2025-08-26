@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { callCpChat, getCpChatUrl, getSupabaseEnv } from "../lib/cpClient";
+import { callCpChat, getCpChatUrl, pingCpChat } from "../lib/cpClient";
 
 type Envelope = {
   success: boolean;
@@ -119,13 +119,19 @@ export default function ChatPage() {
   }
 
   async function pingFunction() {
-    const { url } = getSupabaseEnv();
     const full = getCpChatUrl();
-    setDiag({ url: full });
+    setDiag({ url: full, status: "GET …" });
     try {
-      const { ok, status, statusText, data } = await callCpChat({ user_input: "ping" });
-      setDiag({ url: full, status: `${status} ${statusText}`, sample: data });
-      if (!ok) setLastError(`Ping failed: ${status} ${statusText}`);
+      // First: GET ping (no preflight)
+      const r1 = await pingCpChat();
+      // Second: POST minimal (exercise CORS)
+      const r2 = await callCpChat({ user_input: "ping" });
+      setDiag({
+        url: full,
+        status: `GET ${r1.status} ${r1.statusText} • POST ${r2.status} ${r2.statusText}`,
+        sample: { get: r1.data, post: r2.data }
+      });
+      if (!r1.ok && !r2.ok) setLastError(`Ping failed (GET ${r1.status}, POST ${r2.status})`);
     } catch (e: any) {
       setLastError(`Ping exception: ${e?.message ?? "Unknown"}`);
     }
@@ -139,7 +145,7 @@ export default function ChatPage() {
     <div className="flex flex-col h-[calc(100vh-4rem)] max-w-4xl mx-auto px-4" style={{maxWidth: 880}}>
       <header className="py-4 border-b border-zinc-200">
         <h1 className="text-xl font-semibold text-zinc-800">CP — Chat</h1>
-        <p className="text-sm text-zinc-500 mt-1">React + Vite client using supabase.functions.invoke (with explicit headers) and a fetch fallback.</p>
+        <p className="text-sm text-zinc-500 mt-1">Vite client • Supabase Edge Function with robust CORS + GET ping.</p>
         {lastError ? <Banner kind="error">{lastError}</Banner> : null}
         <div className="mt-3 flex items-center gap-3">
           <button onClick={pingFunction} className="text-xs px-2 py-1 rounded border border-zinc-300 hover:bg-zinc-50">

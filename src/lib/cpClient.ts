@@ -1,5 +1,5 @@
 /**
- * cpClient — hardened: invoke with explicit headers + manual fetch fallback.
+ * cpClient — hardened: invoke with explicit headers + manual fetch fallback + GET ping.
  */
 import { createClient } from "@supabase/supabase-js";
 
@@ -20,6 +20,16 @@ export function getSupabaseClient() {
 export function getCpChatUrl() {
   const { url } = getSupabaseEnv();
   return `${url}/functions/v1/cp-chat`;
+}
+
+/** GET ping that avoids preflight (no custom headers). */
+export async function pingCpChat() {
+  const endpoint = getCpChatUrl();
+  const resp = await fetch(endpoint, { method: "GET" });
+  const text = await resp.text();
+  let data: any = null;
+  try { data = JSON.parse(text); } catch { data = text; }
+  return { ok: resp.ok, status: resp.status, statusText: resp.statusText, data };
 }
 
 /** Low-level fallback using fetch (adds both Authorization and apikey) */
@@ -48,26 +58,34 @@ export async function callCpChat(body: any) {
   const { anon } = getSupabaseEnv();
   const supabase = getSupabaseClient();
 
+  // Try invoke
   try {
     const { data, error } = await supabase.functions.invoke("cp-chat", {
       body: body ?? {},
       headers: {
-        // Some gateways require both; include explicitly.
         "Authorization": `Bearer ${anon}`,
         "apikey": anon
       }
     });
     if (error) {
-      // Try fallback once
-      const fb = await fetchFallback(body);
-      if (!fb.ok) return { ok: false, status: fb.status, statusText: fb.statusText, data: { error, fallback: fb.data } };
-      return { ok: true, status: 200, statusText: "OK(fallback)", data: fb.data };
+      // Fallback once
+      try {
+        const fb = await fetchFallback(body);
+        if (!fb.ok) return { ok: false, status: fb.status, statusText: fb.statusText, data: { error, fallback: fb.data } };
+        return { ok: true, status: 200, statusText: "OK(fallback)", data: fb.data };
+      } catch (e: any) {
+        return { ok: false, status: 0, statusText: "Fallback exception", data: { error, exception: e?.message } };
+      }
     }
     return { ok: true, status: 200, statusText: "OK", data };
   } catch (e: any) {
-    // Network/preflight error inside invoke; use fallback
-    const fb = await fetchFallback(body);
-    if (!fb.ok) return { ok: false, status: fb.status, statusText: fb.statusText, data: { exception: e?.message, fallback: fb.data } };
-    return { ok: true, status: 200, statusText: "OK(fallback)", data: fb.data };
+    // Invoke threw; try fallback
+    try {
+      const fb = await fetchFallback(body);
+      if (!fb.ok) return { ok: false, status: fb.status, statusText: fb.statusText, data: { exception: e?.message, fallback: fb.data } };
+      return { ok: true, status: 200, statusText: "OK(fallback)", data: fb.data };
+    } catch (e2: any) {
+      return { ok: false, status: 0, statusText: "Invoke+fallback exception", data: { invoke: e?.message, fallback: e2?.message } };
+    }
   }
 }

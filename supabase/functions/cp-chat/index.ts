@@ -1,24 +1,36 @@
 /**
  * CP Edge Function: cp-chat
- * CORS FIX: handle OPTIONS preflight and attach CORS headers to every response.
- * Also keeps the stronger JSON enforcement + rescue parser.
+ * CORS v2 + GET ping + robust preflight.
+ *   • Reflects Access-Control-Request-Headers dynamically (avoids preflight 0/Failed-to-fetch).
+ *   • Handles GET/HEAD/OPTIONS for connectivity checks (no custom headers needed).
+ *   • Keeps stricter JSON-only contract and rescue parser for POST.
  */
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
 
-// — CORS helpers —
-const corsHeaders: Record<string, string> = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, apikey, x-client-info, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS"
-};
-function withCors(body: BodyInit | null, init: ResponseInit = {}) {
+// —– CORS helpers —–
+function buildCorsHeaders(req: Request) {
+  const origin = req.headers.get("Origin") ?? "*";
+  const reqHdrs = req.headers.get("Access-Control-Request-Headers") ?? "authorization, apikey, content-type, x-client-info, x-cp-client";
+  const h = new Headers();
+  h.set("Access-Control-Allow-Origin", origin);
+  h.set("Vary", "Origin");
+  h.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, HEAD");
+  h.set("Access-Control-Allow-Headers", reqHdrs);
+  // If you later rely on cookies, flip this to 'true' and set explicit origin.
+  // h.set("Access-Control-Allow-Credentials", "true");
+  return h;
+}
+function withCors(req: Request, body: BodyInit | null, init: ResponseInit = {}) {
   const headers = new Headers(init.headers || {});
-  Object.entries(corsHeaders).forEach(([k, v]) => headers.set(k, v));
+  const cors = buildCorsHeaders(req);
+  cors.forEach((v, k) => headers.set(k, v));
   if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   return new Response(body, { ...init, headers });
 }
+
+// —– utils —–
 
 function uuid(): string {
   // deno-lint-ignore no-explicit-any
@@ -33,34 +45,40 @@ function uuid(): string {
 
 type ClientPayload = { session_id?: string; turn_count?: number; user_input: string };
 
-const SYS_PROMPT = `You are CP, a senior developer companion specialized in Lovable projects. !! CRITICAL INSTRUCTION !! Return ONLY valid JSON that matches the envelope schema. Do not include any prose outside the JSON object. If you cannot comply, return an error envelope.`.trim();
+const SYS_PROMPT = `You are CP, a senior developer companion specialized in Lovable projects. CRITICAL: Return ONLY valid JSON matching the envelope schema. No prose outside the JSON object. If you cannot comply, return an error envelope.`.trim();
 
 function tryRescueParse(content: string): any | null {
-  try {
-    return JSON.parse(content);
-  } catch {
-    // Attempt to extract first {…} block
+  try { return JSON.parse(content); } catch {
     const start = content.indexOf("{");
     const end = content.lastIndexOf("}");
     if (start !== -1 && end !== -1 && end > start) {
       const slice = content.slice(start, end + 1);
-      try { return JSON.parse(slice); } catch { return null; }
+      try { return JSON.parse(slice); } catch { /* fallthrough */ }
     }
     return null;
   }
 }
 
+// —– handler —–
 Deno.serve(async (req) => {
-  // — Handle CORS preflight —
+  const url = new URL(req.url);
+
+  // Preflight
   if (req.method === "OPTIONS") {
-    return withCors("ok", { status: 200, headers: { "Content-Type": "text/plain" } });
+    return withCors(req, "ok", { status: 200, headers: { "Content-Type": "text/plain" } });
+  }
+
+  // Lightweight health/ping (no custom headers required)
+  if (req.method === "GET" || req.method === "HEAD") {
+    const body = req.method === "HEAD" ? null : JSON.stringify({ ok: true, fn: "cp-chat", path: url.pathname, time: new Date().toISOString() });
+    return withCors(req, body, { status: 200, headers: { "Content-Type": "application/json" } });
   }
 
   if (req.method !== "POST") {
-    return withCors(JSON.stringify({ error: { code: "METHOD_NOT_ALLOWED", message: "Use POST" } }), { status: 405 });
+    return withCors(req, JSON.stringify({ error: { code: "METHOD_NOT_ALLOWED", message: "Use POST" } }), { status: 405 });
   }
   if (!OPENAI_API_KEY) {
-    return withCors(JSON.stringify({ error: { code: "MISSING_OPENAI_KEY", message: "OPENAI_API_KEY not set" } }), { status: 500 });
+    return withCors(req, JSON.stringify({ error: { code: "MISSING_OPENAI_KEY", message: "OPENAI_API_KEY not set" } }), { status: 500 });
   }
 
   let payload: ClientPayload;
@@ -87,20 +105,20 @@ Deno.serve(async (req) => {
       })
     });
     const text = await resp.text();
-    let parsed = tryRescueParse(text);
+    const parsed = tryRescueParse(text);
     if (!resp.ok || !parsed) {
-      return withCors(JSON.stringify({
+      return withCors(req, JSON.stringify({
         success: false,
         mode: "chat",
         session_id, turn_id,
         reply_to_user: "I had trouble processing the model reply.",
         confidence: "low",
-        error: { code: "INVALID_JSON", message: text }
+        error: { code: "INVALID_JSON_OR_OPENAI_ERROR", message: text }
       }), { status: 200 });
     }
-    return withCors(JSON.stringify(parsed), { status: 200 });
+    return withCors(req, JSON.stringify(parsed), { status: 200 });
   } catch (err) {
-    return withCors(JSON.stringify({
+    return withCors(req, JSON.stringify({
       success: false,
       mode: "chat",
       session_id, turn_id,
