@@ -1,19 +1,7 @@
-import { useState, useRef, useMemo } from 'react';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Card, CardContent } from '@/components/ui/card';
-import { Copy } from 'lucide-react';
-import { useToast } from '@/hooks/use-toast';
+import { useEffect, useMemo, useRef, useState } from "react";
+import { callCpChat, getCpChatUrl, getSupabaseEnv } from "../lib/cpClient";
 
-interface Message {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-  timestamp: Date;
-  envelope?: Envelope;
-}
-
-interface Envelope {
+type Envelope = {
   success: boolean;
   mode: "chat";
   session_id: string;
@@ -30,201 +18,189 @@ interface Envelope {
     auth: "Google OAuth" | "Magic email link" | "None (dev only)" | null;
     deep_work_hours: "0.5" | "1" | "2" | "4+" | null;
   };
-  status: {
-    complete: boolean;
-    missing: string[];
-    next_question: string | null;
-  };
+  status: { complete: boolean; missing: string[]; next_question: string | null };
   suggestions: string[];
-  error: { code: string | null; message: string | null };
+  error: { code: string | null; message: string | null; details?: any };
   meta: { conversation_stage: "discovery" | "planning" | "generating" | "refining"; turn_count: number };
   block: { language: "lovable-prompt" | "ts" | "js" | "json" | null; content: string | null; copy_safe: boolean } | null;
+};
+
+type ChatItem =
+  | { role: "user"; content: string }
+  | { role: "assistant"; content: string; envelope?: Envelope };
+
+function CopyPromptButton({ content }: { content: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      className="px-3 py-2 rounded-xl bg-zinc-900 text-white text-sm hover:bg-black transition"
+      onClick={async () => {
+        await navigator.clipboard.writeText(content);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
+      }}
+      aria-label="Copy Prompt"
+    >
+      {copied ? "Copied!" : "Copy Prompt"}
+    </button>
+  );
 }
 
-export default function Chat() {
-  const [messages, setMessages] = useState<Message[]>([
-    { 
-      id: crypto.randomUUID(), 
-      role: 'assistant', 
-      content: "Hi! I'm CP. Ask me anything about your Lovable project. When you request code or a Lovable prompt, I'll return it with a Copy button.", 
-      timestamp: new Date() 
-    }
+function Banner({ kind, children }: { kind: "warn" | "error" | "info"; children: any }) {
+  const styles =
+    kind === "error"
+      ? "bg-red-50 border-red-200 text-red-700"
+      : kind === "warn"
+      ? "bg-amber-50 border-amber-200 text-amber-700"
+      : "bg-blue-50 border-blue-200 text-blue-700";
+  return <div className={`mt-2 text-xs border rounded-lg px-3 py-2 ${styles}`}>{children}</div>;
+}
+
+export default function ChatPage() {
+  const [messages, setMessages] = useState<ChatItem[]>([
+    { role: "assistant", content: "Hi! I'm CP. Ask me anything about your Lovable project. If a prompt or code is generated, I'll include a Copy button." }
   ]);
-  const [input, setInput] = useState('');
-  const [loading, setLoading] = useState(false);
-  const { toast } = useToast();
-  
-  const sessionIdRef = useRef(() => crypto.randomUUID());
-  
-  const turnCount = useMemo(() => {
-    return messages.filter(m => m.role === 'user').length;
-  }, [messages]);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [lastError, setLastError] = useState<string | null>(null);
+  const [diag, setDiag] = useState<{ url: string; status?: string; sample?: any } | null>(null);
 
-  const addMessage = (role: 'user' | 'assistant', content: string, envelope?: Envelope) => {
-    const newMessage: Message = {
-      id: crypto.randomUUID(),
-      role,
-      content,
-      timestamp: new Date(),
-      envelope,
-    };
-    setMessages(prev => [...prev, newMessage]);
-  };
+  const sessionIdRef = useRef(() => {
+    const tpl = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx";
+    return tpl.replace(/[xy]/g, c => {
+      const r = (Math.random() * 16) | 0;
+      const v = c === "x" ? r : (r & 0x3) | 0x8;
+      return v.toString(16);
+    });
+  }) as unknown as React.MutableRefObject<string>;
 
-  const copyToClipboard = async (text: string) => {
+  const turnCount = useMemo(() => messages.filter(m => m.role === "user").length, [messages]);
+
+  async function sendMessage() {
+    const text = input.trim();
+    if (!text || busy) return;
+    setBusy(true);
+    setLastError(null);
+    setMessages(prev => [...prev, { role: "user", content: text }]);
+    setInput("");
     try {
-      await navigator.clipboard.writeText(text);
-      toast({
-        title: "Copied to clipboard",
-        description: "Prompt has been copied successfully.",
+      const { ok, status, statusText, data } = await callCpChat({
+        session_id: sessionIdRef.current,
+        turn_count: turnCount + 1,
+        user_input: text
       });
-    } catch (err) {
-      toast({
-        title: "Failed to copy",
-        description: "Could not copy to clipboard.",
-        variant: "destructive",
-      });
-    }
-  };
-
-  const sendMessage = async () => {
-    if (!input.trim() || loading) return;
-
-    const userMessage = input.trim();
-    setInput('');
-    setLoading(true);
-
-    // Add user message
-    addMessage('user', userMessage);
-
-    try {
-      const response = await fetch('/functions/v1/cp-chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          session_id: sessionIdRef.current,
-          turn_count: turnCount + 1,
-          user_input: userMessage,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      if (!ok) {
+        setLastError(`Edge Function responded ${status} ${statusText}`);
+        setMessages(prev => [...prev, { role: "assistant", content: "I couldn't reach the chat engine. Check deployment settings and try again." }]);
+        setDiag({ url: getCpChatUrl(), status: `${status} ${statusText}`, sample: data });
+        return;
       }
-
-      const envelope: Envelope = await response.json();
-      
-      // Add assistant message (enforce one message per turn)
-      const assistantText = envelope?.reply_to_user ?? 
-                           envelope?.error?.message ?? 
-                           "I had trouble processing that. Please try again.";
-      
-      addMessage('assistant', assistantText, envelope);
-
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-      addMessage('assistant', `Error: ${errorMessage}`);
+      const envelope: Envelope = data;
+      const assistantText =
+        envelope?.reply_to_user ??
+        envelope?.error?.message ??
+        "I had trouble processing that. Please try again.";
+      setMessages(prev => [...prev, { role: "assistant", content: assistantText, envelope }]);
+    } catch (e: any) {
+      const msg = `Network error: ${e?.message ?? "Unknown"}`;
+      setLastError(msg);
+      setMessages(prev => [...prev, { role: "assistant", content: "Network error. Please try again." }]);
+      setDiag({ url: getCpChatUrl(), status: "client exception", sample: msg });
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
-  };
+  }
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    sendMessage();
-  };
+  function onKeyDown(e: React.KeyboardEvent) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  }
+
+  async function pingFunction() {
+    const { url } = getSupabaseEnv();
+    const full = getCpChatUrl();
+    setDiag({ url: full });
+    try {
+      const { ok, status, statusText, data } = await callCpChat({ user_input: "ping" });
+      setDiag({ url: full, status: `${status} ${statusText}`, sample: data });
+      if (!ok) setLastError(`Ping failed: ${status} ${statusText}`);
+    } catch (e: any) {
+      setLastError(`Ping exception: ${e?.message ?? "Unknown"}`);
+    }
+  }
+
+  useEffect(() => {
+    window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+  }, [messages.length]);
 
   return (
-    <div className="container mx-auto max-w-4xl p-4 h-screen flex flex-col">
-      <div className="flex-1 overflow-hidden flex flex-col">
-        <h1 className="text-2xl font-bold mb-4">Chat</h1>
-        
-        {/* Message List */}
-        <div className="flex-1 overflow-y-auto space-y-4 mb-4">
-          {messages.length === 0 ? (
-            <div className="text-center text-muted-foreground py-8">
-              Start a conversation by typing a message below.
-            </div>
-          ) : (
-            messages.map((message) => (
-              <div key={message.id} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <Card className={`max-w-[80%] ${message.role === 'user' ? 'bg-primary text-primary-foreground' : ''}`}>
-                  <CardContent className="p-3">
-                    <div className="text-sm font-medium mb-1 capitalize">
-                      {message.role}
-                    </div>
-                    <div className="whitespace-pre-wrap">
-                      {message.content}
-                    </div>
-                    
-                    {/* Code block for assistant messages with block.content */}
-                    {message.role === 'assistant' && message.envelope?.block?.content && (
-                      <div className="mt-3 relative">
-                        <pre className="bg-muted p-3 rounded text-sm overflow-x-auto">
-                          <code>{message.envelope.block.content}</code>
-                        </pre>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="absolute top-2 right-2"
-                          onClick={() => copyToClipboard(message.envelope?.block?.content || '')}
-                        >
-                          <Copy className="h-3 w-3" />
-                          Copy Prompt
-                        </Button>
-                        <div className="mt-2 text-xs text-muted-foreground">
-                          {message.envelope.block.language === "lovable-prompt" ? "Lovable prompt ready" : "Code block ready"}
-                        </div>
-                      </div>
-                    )}
-                    
-                    {/* Show next question if present */}
-                    {message.role === 'assistant' && message.envelope?.status?.next_question && (
-                      <div className="mt-2 text-xs text-muted-foreground">
-                        <span className="font-medium">Next:</span> {message.envelope.status.next_question}
-                      </div>
-                    )}
-                    
-                    {/* Show low confidence warning */}
-                    {message.role === 'assistant' && message.envelope?.confidence === "low" && (
-                      <div className="mt-2 text-xs text-amber-600">
-                        Confidence is low — consider rephrasing.
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
-              </div>
-            ))
-          )}
-          
-          {loading && (
-            <div className="flex justify-start">
-              <Card className="max-w-[80%]">
-                <CardContent className="p-3">
-                  <div className="text-sm font-medium mb-1">Assistant</div>
-                  <div className="text-muted-foreground">Thinking...</div>
-                </CardContent>
-              </Card>
-            </div>
-          )}
+    <div className="flex flex-col h-[calc(100vh-4rem)] max-w-4xl mx-auto px-4" style={{maxWidth: 880}}>
+      <header className="py-4 border-b border-zinc-200">
+        <h1 className="text-xl font-semibold text-zinc-800">CP — Chat</h1>
+        <p className="text-sm text-zinc-500 mt-1">React + Vite client calling Supabase Edge Function directly.</p>
+        {lastError ? <Banner kind="error">{lastError}</Banner> : null}
+        <div className="mt-3 flex items-center gap-3">
+          <button onClick={pingFunction} className="text-xs px-2 py-1 rounded border border-zinc-300 hover:bg-zinc-50">
+            Ping cp-chat
+          </button>
+          <span className="text-xs text-zinc-400">Endpoint: {getCpChatUrl()}</span>
         </div>
+        {diag ? (
+          <div className="mt-2 p-2 rounded bg-zinc-50 text-xs font-mono text-zinc-600">
+            <div>URL: {diag.url}</div>
+            {diag.status ? <div>Status: {diag.status}</div> : null}
+            {typeof diag.sample === "string" ? (
+              <pre className="mt-1 whitespace-pre-wrap">{diag.sample}</pre>
+            ) : diag.sample ? (
+              <pre className="mt-1 whitespace-pre-wrap">{JSON.stringify(diag.sample, null, 2)}</pre>
+            ) : null}
+          </div>
+        ) : null}
+      </header>
 
-        {/* Message Input */}
-        <form onSubmit={handleSubmit} className="flex gap-2">
-          <Input
+      <main className="flex-1 overflow-y-auto space-y-4 pb-4">
+        {messages.map((m, i) => (
+          <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+            <div className={`rounded-2xl px-4 py-3 shadow ${m.role === "user" ? "bg-zinc-900 text-white" : "bg-white border border-zinc-200"}`} style={{ maxWidth: "85%" }}>
+              <div className="whitespace-pre-wrap text-sm leading-relaxed">{m.content}</div>
+              {m.role === "assistant" && (m as any).envelope?.block?.content ? (
+                <div className="mt-3 flex items-center gap-2">
+                  <CopyPromptButton content={(m as any).envelope.block.content as string} />
+                  <span className="text-xs text-zinc-400">
+                    {(m as any).envelope.block.language === "lovable-prompt" ? "Lovable prompt ready" : "Code block ready"}
+                  </span>
+                </div>
+              ) : null}
+              {m.role === "assistant" && (m as any).envelope?.status?.next_question ? (
+                <div className="mt-2 text-xs text-zinc-500">
+                  <span className="font-medium">Next:</span> {(m as any).envelope.status.next_question}
+                </div>
+              ) : null}
+              {m.role === "assistant" && (m as any).envelope?.confidence === "low" ? (
+                <div className="mt-2 text-xs text-amber-600">Confidence is low — consider rephrasing.</div>
+              ) : null}
+            </div>
+          </div>
+        ))}
+      </main>
+
+      <footer className="border-t border-zinc-200 py-3">
+        <div className="flex items-end gap-2">
+          <textarea
             value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Type your message..."
-            disabled={loading}
-            className="flex-1"
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={onKeyDown}
+            placeholder={busy ? "Thinking…" : "Type your message…"}
+            className="w-full min-h-[56px] max-h-40 p-3 rounded-xl border border-zinc-300 focus:outline-none focus:ring-2 focus:ring-zinc-400 text-sm"
           />
-          <Button type="submit" disabled={loading || !input.trim()}>
-            Send
-          </Button>
-        </form>
-      </div>
+          <button onClick={sendMessage} disabled={busy || !input.trim()} className="px-4 h-[44px] rounded-xl bg-black text-white text-sm disabled:opacity-50">
+            {busy ? "…" : "Send"}
+          </button>
+        </div>
+        <div className="mt-2 text-[10px] text-zinc-400">Press Enter to send • Shift+Enter for a new line</div>
+      </footer>
     </div>
   );
 }
