@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent } from '@/components/ui/card';
@@ -10,27 +10,63 @@ interface Message {
   role: 'user' | 'assistant';
   content: string;
   timestamp: Date;
+  envelope?: Envelope;
 }
 
-interface EdgeResponse {
-  reply_to_user?: string;
-  block?: {
-    content: string;
+interface Envelope {
+  success: boolean;
+  mode: "chat";
+  session_id: string;
+  turn_id: string;
+  reply_to_user: string;
+  confidence: "high" | "medium" | "low";
+  extracted: {
+    tone: "eli5" | "intermediate" | "developer" | null;
+    idea: string | null;
+    name: string | null;
+    audience: string | null;
+    features: string[];
+    privacy: "Private" | "Share via link" | "Public" | null;
+    auth: "Google OAuth" | "Magic email link" | "None (dev only)" | null;
+    deep_work_hours: "0.5" | "1" | "2" | "4+" | null;
   };
+  status: {
+    complete: boolean;
+    missing: string[];
+    next_question: string | null;
+  };
+  suggestions: string[];
+  error: { code: string | null; message: string | null };
+  meta: { conversation_stage: "discovery" | "planning" | "generating" | "refining"; turn_count: number };
+  block: { language: "lovable-prompt" | "ts" | "js" | "json" | null; content: string | null; copy_safe: boolean } | null;
 }
 
 export default function Chat() {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<Message[]>([
+    { 
+      id: crypto.randomUUID(), 
+      role: 'assistant', 
+      content: "Hi! I'm CP. Ask me anything about your Lovable project. When you request code or a Lovable prompt, I'll return it with a Copy button.", 
+      timestamp: new Date() 
+    }
+  ]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const { toast } = useToast();
+  
+  const sessionIdRef = useRef(() => crypto.randomUUID());
+  
+  const turnCount = useMemo(() => {
+    return messages.filter(m => m.role === 'user').length;
+  }, [messages]);
 
-  const addMessage = (role: 'user' | 'assistant', content: string) => {
+  const addMessage = (role: 'user' | 'assistant', content: string, envelope?: Envelope) => {
     const newMessage: Message = {
       id: crypto.randomUUID(),
       role,
       content,
       timestamp: new Date(),
+      envelope,
     };
     setMessages(prev => [...prev, newMessage]);
   };
@@ -62,13 +98,15 @@ export default function Chat() {
     addMessage('user', userMessage);
 
     try {
-      const response = await fetch('/functions/v1/ai-generate', {
+      const response = await fetch('/functions/v1/cp-chat', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          prompt: userMessage,
+          session_id: sessionIdRef.current,
+          turn_count: turnCount + 1,
+          user_input: userMessage,
         }),
       });
 
@@ -76,12 +114,14 @@ export default function Chat() {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
-      const data: EdgeResponse = await response.json();
+      const envelope: Envelope = await response.json();
       
       // Add assistant message (enforce one message per turn)
-      if (data.reply_to_user) {
-        addMessage('assistant', data.reply_to_user);
-      }
+      const assistantText = envelope?.reply_to_user ?? 
+                           envelope?.error?.message ?? 
+                           "I had trouble processing that. Please try again.";
+      
+      addMessage('assistant', assistantText, envelope);
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
@@ -120,20 +160,37 @@ export default function Chat() {
                     </div>
                     
                     {/* Code block for assistant messages with block.content */}
-                    {message.role === 'assistant' && message.content.includes('```') && (
+                    {message.role === 'assistant' && message.envelope?.block?.content && (
                       <div className="mt-3 relative">
                         <pre className="bg-muted p-3 rounded text-sm overflow-x-auto">
-                          <code>{message.content.match(/```[\s\S]*?```/)?.[0]?.replace(/```/g, '') || ''}</code>
+                          <code>{message.envelope.block.content}</code>
                         </pre>
                         <Button
                           size="sm"
                           variant="outline"
                           className="absolute top-2 right-2"
-                          onClick={() => copyToClipboard(message.content.match(/```[\s\S]*?```/)?.[0]?.replace(/```/g, '') || '')}
+                          onClick={() => copyToClipboard(message.envelope?.block?.content || '')}
                         >
                           <Copy className="h-3 w-3" />
                           Copy Prompt
                         </Button>
+                        <div className="mt-2 text-xs text-muted-foreground">
+                          {message.envelope.block.language === "lovable-prompt" ? "Lovable prompt ready" : "Code block ready"}
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* Show next question if present */}
+                    {message.role === 'assistant' && message.envelope?.status?.next_question && (
+                      <div className="mt-2 text-xs text-muted-foreground">
+                        <span className="font-medium">Next:</span> {message.envelope.status.next_question}
+                      </div>
+                    )}
+                    
+                    {/* Show low confidence warning */}
+                    {message.role === 'assistant' && message.envelope?.confidence === "low" && (
+                      <div className="mt-2 text-xs text-amber-600">
+                        Confidence is low — consider rephrasing.
                       </div>
                     )}
                   </CardContent>

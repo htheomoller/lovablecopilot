@@ -1,2 +1,5 @@
 [project]
 id = "yjfqfnmrsdfbvlyursdi"
+
+[functions.cp-chat]
+verify_jwt = false
