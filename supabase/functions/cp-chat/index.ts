@@ -1,13 +1,24 @@
 /**
  * CP Edge Function: cp-chat
- * Patch: strengthen JSON enforcement + rescue parser.
- *   • Doubles system reminder: must return only JSON.
- *   • Adds rescue parser: extract first {…} block if extra text is present.
- *   • If still invalid, surface raw model output in error.message.
+ * CORS FIX: handle OPTIONS preflight and attach CORS headers to every response.
+ * Also keeps the stronger JSON enforcement + rescue parser.
  */
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
+
+// — CORS helpers —
+const corsHeaders: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, apikey, x-client-info, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS"
+};
+function withCors(body: BodyInit | null, init: ResponseInit = {}) {
+  const headers = new Headers(init.headers || {});
+  Object.entries(corsHeaders).forEach(([k, v]) => headers.set(k, v));
+  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  return new Response(body, { ...init, headers });
+}
 
 function uuid(): string {
   // deno-lint-ignore no-explicit-any
@@ -40,8 +51,17 @@ function tryRescueParse(content: string): any | null {
 }
 
 Deno.serve(async (req) => {
-  if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
-  if (!OPENAI_API_KEY) return new Response("Missing OPENAI_API_KEY", { status: 500 });
+  // — Handle CORS preflight —
+  if (req.method === "OPTIONS") {
+    return withCors("ok", { status: 200, headers: { "Content-Type": "text/plain" } });
+  }
+
+  if (req.method !== "POST") {
+    return withCors(JSON.stringify({ error: { code: "METHOD_NOT_ALLOWED", message: "Use POST" } }), { status: 405 });
+  }
+  if (!OPENAI_API_KEY) {
+    return withCors(JSON.stringify({ error: { code: "MISSING_OPENAI_KEY", message: "OPENAI_API_KEY not set" } }), { status: 500 });
+  }
 
   let payload: ClientPayload;
   try { payload = await req.json(); } catch { payload = { user_input: "" }; }
@@ -69,24 +89,24 @@ Deno.serve(async (req) => {
     const text = await resp.text();
     let parsed = tryRescueParse(text);
     if (!resp.ok || !parsed) {
-      return new Response(JSON.stringify({
+      return withCors(JSON.stringify({
         success: false,
         mode: "chat",
         session_id, turn_id,
         reply_to_user: "I had trouble processing the model reply.",
         confidence: "low",
         error: { code: "INVALID_JSON", message: text }
-      }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }), { status: 200 });
     }
-    return new Response(JSON.stringify(parsed), { status: 200, headers: { "Content-Type": "application/json" } });
+    return withCors(JSON.stringify(parsed), { status: 200 });
   } catch (err) {
-    return new Response(JSON.stringify({
+    return withCors(JSON.stringify({
       success: false,
       mode: "chat",
       session_id, turn_id,
       reply_to_user: "I had trouble reaching the model.",
       confidence: "low",
       error: { code: "EDGE_RUNTIME_ERROR", message: String(err?.message ?? err) }
-    }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }), { status: 200 });
   }
 });

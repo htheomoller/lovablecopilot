@@ -1,9 +1,11 @@
-# M3 — Invoke hardening + fallback
-- Invoke path now sends both Authorization: Bearer <anon> and apikey: <anon> headers explicitly.
-- Added manual fetch fallback (CORS-friendly) when functions.invoke reports a FunctionsFetchError.
-- Diagnostics panel continues to show the final path result (invoke or fallback).
+# M3 — CORS fix for cp-chat (preflight support)
+- Added OPTIONS handler and CORS headers (Access-Control-Allow-Origin, -Headers, -Methods) to every response.
+- Kept the stronger JSON enforcement + rescue parser from the previous iteration.
+- This resolves browser-side "Failed to fetch" caused by preflight 405s.
 
-## Quick checks
-- Ensure Vite envs are set and the app rebuilt: VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY.
-- Confirm the Edge Function URL resolves from your device (no VPN/DNS blockers).
-- If you still see FunctionsFetchError, the fallback section in the diagnostics box will show the raw gateway response for us to debug next.
+## Deploy
+```
+supabase functions deploy cp-chat --no-verify-jwt --project-ref <YOUR_PROJECT_REF>
+```
+
+Then reload /chat and hit "Ping cp-chat". You should now see a 200 with a JSON envelope (or a surfaced model error if upstream fails).
