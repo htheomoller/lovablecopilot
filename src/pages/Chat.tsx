@@ -29,6 +29,14 @@ type ChatItem =
   | { role: "user"; content: string }
   | { role: "assistant"; content: string; envelope?: Envelope };
 
+function formatReply(reply: any): string {
+  if (typeof reply === "string") return reply;
+  if (typeof reply === "object" && reply !== null) {
+    return JSON.stringify(reply, null, 2);
+  }
+  return String(reply);
+}
+
 function CopyPromptButton({ content }: { content: string }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -96,10 +104,11 @@ export default function ChatPage() {
         return;
       }
       const envelope: Envelope = data;
-      const assistantText =
+      const assistantText = formatReply(
         envelope?.reply_to_user ??
         envelope?.error?.message ??
-        "I had trouble processing that. Please try again.";
+        "I had trouble processing that. Please try again."
+      );
       setMessages(prev => [...prev, { role: "assistant", content: assistantText, envelope }]);
     } catch (e: any) {
       const msg = `Network error: ${e?.message ?? "Unknown"}`;

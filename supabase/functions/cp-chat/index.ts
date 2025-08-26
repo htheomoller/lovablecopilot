@@ -1,33 +1,29 @@
 /**
  * CP Edge Function: cp-chat
- * FINAL NORMALIZER + SHORT-CIRCUIT PING
- *   • Guarantees we NEVER return raw OpenAI completion objects.
- *   • If user_input === "ping", returns a valid CP envelope without calling OpenAI (smoke test).
- *   • Adds X-CP-Version header so we can confirm deploy.
+ * Dev fallback for missing Supabase secrets + /health/secrets endpoint.
+ *   • If OPENAI_API_KEY missing and DEV_UNSAFE_ALLOW_KEY=true, allow passing openai_api_key in body (dev only).
+ *   • Adds GET /health/secrets to check whether the function sees the key.
+ * NOTE: Remove DEV_UNSAFE_ALLOW_KEY in prod. This is for unblocking development only.
  */
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
-const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
+const ENV_OPENAI = Deno.env.get("OPENAI_API_KEY");
+const DEV_UNSAFE_ALLOW_KEY = (Deno.env.get("DEV_UNSAFE_ALLOW_KEY") ?? "false").toLowerCase() === "true";
 const CP_MODEL_DEFAULT = Deno.env.get("CP_MODEL_DEFAULT") ?? "gpt-5";
 const CP_MODEL_MINI = Deno.env.get("CP_MODEL_MINI") ?? "gpt-4.1-mini";
-const CP_VERSION = "m3.7-normalizer";
+const CP_VERSION = "m3.8-dev-fallback";
 
-// —– Capability map —–
-// If a model requires default sampling, mark supports.temperature=false.
 const MODEL_CAPS: Record<string, { supports: { temperature: boolean; top_p: boolean } }> = {
   "gpt-5": { supports: { temperature: false, top_p: false } },
   "gpt-4.1-mini": { supports: { temperature: true, top_p: true } }
 };
 
-// Intent detection (very light)
 function detectIntent(text: string): "generate_code" | "brainstorm" | "chat" {
   const t = (text || "").toLowerCase();
   if (t.includes("code") || t.includes("patch") || t.includes("prompt")) return "generate_code";
   if (t.includes("idea") || t.includes("brainstorm") || t.includes("name")) return "brainstorm";
   return "chat";
 }
-
-// Route model + (desired) temperature; we will prune unsupported later.
 function pickModelAndTemp(intent: "generate_code" | "brainstorm" | "chat") {
   if (intent === "generate_code") return { model: CP_MODEL_DEFAULT, temperature: 0.2 };
   if (intent === "brainstorm") return { model: CP_MODEL_MINI, temperature: 0.8 };
@@ -53,7 +49,6 @@ function withCors(req: Request, body: BodyInit | null, init: ResponseInit = {}) 
   return new Response(body, { ...init, headers });
 }
 
-// — utils —
 function uuid(): string {
   // deno-lint-ignore no-explicit-any
   const cryptoAny = crypto as any;
@@ -89,10 +84,11 @@ type Envelope = {
   block: { language: "lovable-prompt" | "ts" | "js" | "json" | null; content: string | null; copy_safe: boolean } | null;
 };
 
-type ClientPayload = { session_id?: string; turn_count?: number; user_input: string };
+type ClientPayload = { session_id?: string; turn_count?: number; user_input: string; openai_api_key?: string };
 
 const SYS_PROMPT = `You are CP, a senior developer companion specialized in Lovable projects. CRITICAL: Return ONLY valid JSON matching the envelope schema. No prose outside the JSON object. If you cannot comply, return an error envelope.`.trim();
 
+function tryJSON<T = any>(s: string): T | null { try { return JSON.parse(s) as T; } catch { return null; } }
 function safeEnvelope(partial: Partial<Envelope>): Envelope {
   return {
     success: partial.success ?? true,
@@ -109,8 +105,6 @@ function safeEnvelope(partial: Partial<Envelope>): Envelope {
     block: partial.block ?? null
   };
 }
-
-function tryJSON<T = any>(s: string): T | null { try { return JSON.parse(s) as T; } catch { return null; } }
 
 function normalizeFromModel(content: string, session_id: string, turn_id: string, turn_count: number): Envelope {
   const parsed = tryJSON(content);
@@ -134,14 +128,33 @@ Deno.serve(async (req) => {
   const url = new URL(req.url);
 
   if (req.method === "OPTIONS") return withCors(req, "ok", { status: 200, headers: { "Content-Type": "text/plain" } });
+  
   if (req.method === "GET" || req.method === "HEAD") {
-    const body = req.method === "HEAD" ? null : JSON.stringify({ ok: true, fn: "cp-chat", path: url.pathname, time: new Date().toISOString(), version: CP_VERSION });
+    // Health/secrets endpoint
+    if (url.pathname.endsWith("/health/secrets")) {
+      const body = req.method === "HEAD" ? null : JSON.stringify({ 
+        has_key: !!ENV_OPENAI, 
+        dev_fallback_enabled: DEV_UNSAFE_ALLOW_KEY,
+        version: CP_VERSION 
+      });
+      return withCors(req, body, { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    
+    // Regular health check
+    const body = req.method === "HEAD" ? null : JSON.stringify({ 
+      ok: true, 
+      fn: "cp-chat", 
+      path: url.pathname, 
+      time: new Date().toISOString(), 
+      version: CP_VERSION 
+    });
     return withCors(req, body, { status: 200, headers: { "Content-Type": "application/json" } });
   }
+  
   if (req.method !== "POST") return withCors(req, JSON.stringify({ error: { code: "METHOD_NOT_ALLOWED", message: "Use POST" } }), { status: 405 });
-  if (!OPENAI_API_KEY) return withCors(req, JSON.stringify({ error: { code: "MISSING_OPENAI_KEY", message: "OPENAI_API_KEY not set" } }), { status: 500 });
 
-  let payload: ClientPayload; try { payload = await req.json(); } catch { payload = { user_input: "" }; }
+  let payload: ClientPayload; 
+  try { payload = await req.json(); } catch { payload = { user_input: "" }; }
 
   const session_id = payload.session_id ?? uuid();
   const turn_id = uuid();
@@ -157,6 +170,23 @@ Deno.serve(async (req) => {
       meta: { conversation_stage: "planning", turn_count }
     });
     return withCors(req, JSON.stringify(env), { status: 200 });
+  }
+
+  // Determine OpenAI key (env or dev fallback)
+  let openaiKey = ENV_OPENAI;
+  if (!openaiKey && DEV_UNSAFE_ALLOW_KEY && payload.openai_api_key) {
+    openaiKey = payload.openai_api_key;
+  }
+
+  if (!openaiKey) {
+    return withCors(req, JSON.stringify(safeEnvelope({
+      success: false,
+      session_id, turn_id,
+      reply_to_user: "OpenAI API key not available. Check secrets or provide key in dev mode.",
+      confidence: "low",
+      error: { code: "MISSING_OPENAI_KEY", message: "OPENAI_API_KEY not set and no dev fallback provided" },
+      meta: { conversation_stage: "planning", turn_count }
+    })), { status: 500 });
   }
 
   const intent = detectIntent(userText);
@@ -178,7 +208,7 @@ Deno.serve(async (req) => {
   try {
     const resp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
-      headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
+      headers: { "Authorization": `Bearer ${openaiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify(body)
     });
 
