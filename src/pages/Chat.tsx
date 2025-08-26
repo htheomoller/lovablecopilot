@@ -21,7 +21,7 @@ type Envelope = {
   status: { complete: boolean; missing: string[]; next_question: string | null };
   suggestions: string[];
   error: { code: string | null; message: string | null; details?: any };
-  meta: { conversation_stage: "discovery" | "planning" | "generating" | "refining"; turn_count: number };
+  meta: { conversation_stage: "discovery" | "planning" | "generating" | "refining"; turn_count: number; schema_version: string };
   block: { language: "lovable-prompt" | "ts" | "js" | "json" | null; content: string | null; copy_safe: boolean } | null;
 };
 

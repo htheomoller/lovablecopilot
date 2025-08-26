@@ -1,10 +1,7 @@
 /**
  * CP Edge Function: cp-chat
- * One-shot harden (final): handle response wrappers (string or object with {text|message|content})
- *   • Many turns arrive as: {"session_id": "…", "turn_id": "…", "response": "…"}  OR  {"response": {"text":"…"}}
- *   • This patch teaches the universal extractor to treat response as the primary payload.
- *   • Keeps all previous guards (JSON-string unwrap, arrays/objects flattening, envelope passthrough).
- * Version: m3.15-response-key
+ * Patch: Replace SYS_PROMPT with hardened M3 System Prompt (with success=false examples).
+ * Version: m3.17-m3-sysprompt
  */
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
@@ -80,7 +77,7 @@ type Envelope = {
   status: { complete: boolean; missing: string[]; next_question: string | null };
   suggestions: string[];
   error: { code: string | null; message: string | null };
-  meta: { conversation_stage: "discovery" | "planning" | "generating" | "refining"; turn_count: number };
+  meta: { conversation_stage: "discovery" | "planning" | "generating" | "refining"; turn_count: number; schema_version: string };
   block: { language: "lovable-prompt" | "ts" | "js" | "json" | null; content: string | null; copy_safe: boolean } | null;
 };
 type ClientPayload = { session_id?: string; turn_count?: number; user_input: string; openai_api_key?: string };
@@ -97,7 +94,7 @@ function safeEnvelope(partial: Partial<Envelope>): Envelope {
     status: partial.status ?? { complete: false, missing: [], next_question: null },
     suggestions: partial.suggestions ?? [],
     error: partial.error ?? { code: null, message: null },
-    meta: partial.meta ?? { conversation_stage: "planning", turn_count: 0 },
+    meta: partial.meta ?? { conversation_stage: "planning", turn_count: 0, schema_version: "1.0" },
     block: partial.block ?? null
   };
 }
