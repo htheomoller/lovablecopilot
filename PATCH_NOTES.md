@@ -1,16 +1,21 @@
-# M3 — Treat { "text": "…", "type": "text" } as the message
+# M3 — Flatten structured message.content (arrays/objects) → plain text
 
-## What was happening
-The model sometimes returns generic JSON shapes like `{ "text": "…", "type": "text" }` instead of our expected envelope format. The normalizer only looked for `reply_to_user`, `response`, `reply`, or `message` fields, so when it didn't find those, it passed the entire object back as text — causing chat bubbles to show JSON blobs.
+## Problem
+Some OpenAI responses use structured content (arrays of parts or {type, text} objects). Those slipped through as {"text":"…"}.
 
 ## Fix
-- Normalizer now recognizes the `text/type` shape many models emit and uses `text` as `reply_to_user`
-- Keeps earlier guards: envelope passthrough, response/reply/message aliases, pretty-string fallback
-- Version header: `X-CP-Version: m3.11-text-alias` to confirm deploy
+`flattenMessageContent()` now:
+- Joins arrays of parts using each part's .text or .content.
+- Reads object content via .text or .content.
+- Falls back to string message.content when present.
 
-## Test
-1. Hard refresh `/chat`
-2. Hit Ping → confirm version shows `m3.11-text-alias`
-3. Ask "help me build a to-do app" → bubble should show the actual sentence/code, not a JSON blob
+We still normalize any JSON-shaped text the model returns (envelopes, {response:…}, {text:…}) and guarantee reply_to_user is a string.
 
-If you still see a JSON blob afterward, paste the latest Network → Response body and I'll extend the normalizer for that shape too (some models return arrays of parts; we can fold those into text).
+## Deploy
+```
+supabase functions deploy cp-chat --no-verify-jwt --project-ref <YOUR_PROJECT_REF>
+```
+
+## Verify
+- Network → Response headers show `X-CP-Version: m3.12-content-array`.
+- Ask "help me build a to-do app" → the bubble shows a clean sentence/code snippet, not a JSON object.

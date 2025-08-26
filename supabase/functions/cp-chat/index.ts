@@ -10,7 +10,7 @@ const ENV_OPENAI = Deno.env.get("OPENAI_API_KEY");
 const DEV_UNSAFE_ALLOW_KEY = (Deno.env.get("DEV_UNSAFE_ALLOW_KEY") ?? "false").toLowerCase() === "true";
 const CP_MODEL_DEFAULT = Deno.env.get("CP_MODEL_DEFAULT") ?? "gpt-5";
 const CP_MODEL_MINI = Deno.env.get("CP_MODEL_MINI") ?? "gpt-4.1-mini";
-const CP_VERSION = "m3.11-text-alias";
+const CP_VERSION = "m3.12-content-array";
 
 const MODEL_CAPS: Record<string, { supports: { temperature: boolean; top_p: boolean } }> = {
   "gpt-5": { supports: { temperature: false, top_p: false } },
@@ -122,28 +122,47 @@ function safeEnvelope(partial: Partial<Envelope>): Envelope {
 
 function normalizeFromModel(content: string, session_id: string, turn_id: string, turn_count: number): Envelope {
   const parsed = tryJSON(content);
-  
-  // If already our envelope, sanitize & return
+
+  // Envelope passthrough
   if (parsed && typeof parsed === "object" && ("reply_to_user" in parsed || "success" in parsed)) {
-    const env = safeEnvelope({
-      ...parsed,
-      session_id,
-      turn_id,
-      meta: (parsed.meta as any) ?? { conversation_stage: "planning", turn_count }
-    });
-    // Ensure reply_to_user is a clean string even if original was object
+    const env = safeEnvelope({ ...parsed, session_id, turn_id, meta: parsed.meta ?? { conversation_stage: "planning", turn_count } });
     return { ...env, reply_to_user: toText(env.reply_to_user).replace(/```/g, "") };
   }
 
-  // NEW: treat {text, type} as plain reply
+  // Recognize {text, type}
   if (parsed && typeof parsed === "object" && "text" in parsed) {
-    const txt = parsed.text;
-    return safeEnvelope({ session_id, turn_id, reply_to_user: toText(txt), meta: { conversation_stage: "planning", turn_count } });
+    return safeEnvelope({ session_id, turn_id, reply_to_user: toText(parsed.text), meta: { conversation_stage: "planning", turn_count } });
   }
 
   // Legacy aliases
   const reply = (parsed && (parsed.response || parsed.reply || parsed.message)) || content;
   return safeEnvelope({ session_id, turn_id, reply_to_user: toText(reply), meta: { conversation_stage: "planning", turn_count } });
+}
+
+/** NEW: flatten structured message.content from OpenAI (arrays/objects) into a string */
+function flattenMessageContent(msg: any): string | null {
+  const c = msg?.content;
+  if (typeof c === "string") return c;
+  // Array of parts: take .text or .content from each
+  if (Array.isArray(c)) {
+    const pieces = c.map((p: any) => {
+      if (typeof p === "string") return p;
+      if (p && typeof p === "object") {
+        // common shapes: {type:"output_text"| "text" , text:"…"}, {text:"…"}
+        if (typeof p.text === "string") return p.text;
+        if (typeof p.content === "string") return p.content;
+      }
+      return "";
+    }).filter(Boolean);
+    const joined = pieces.join("\n").trim();
+    return joined.length ? joined : null;
+  }
+  // Object with text/content
+  if (c && typeof c === "object") {
+    if (typeof c.text === "string") return c.text;
+    if (typeof c.content === "string") return c.content;
+  }
+  return null;
 }
 
 // —– handler —–
@@ -213,8 +232,13 @@ Deno.serve(async (req) => {
       })), { status: 200 });
     }
     const completion = tryJSON(raw);
-    const content = completion?.choices?.[0]?.message?.content;
-    if (typeof content !== "string" || !content.length) {
+    const msg = completion?.choices?.[0]?.message;
+    let content: string | null = flattenMessageContent(msg);
+    if (!content || !content.length) {
+      // Fallback to raw string content if any
+      if (typeof msg?.content === "string") content = msg.content;
+    }
+    if (!content || !content.length) {
       return withCors(req, JSON.stringify(safeEnvelope({
         success: false, session_id, turn_id,
         reply_to_user: "Model returned an empty message.",
@@ -223,8 +247,8 @@ Deno.serve(async (req) => {
         meta: { conversation_stage: "planning", turn_count }
       })), { status: 200 });
     }
+
     const envelope = normalizeFromModel(content, session_id, turn_id, turn_count);
-    // Final guard: coerce reply_to_user again just before returning
     envelope.reply_to_user = toText(envelope.reply_to_user).replace(/```/g, "");
     return withCors(req, JSON.stringify(envelope), { status: 200 });
   } catch (err) {
