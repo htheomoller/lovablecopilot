@@ -1,5 +1,6 @@
 /**
- * cpClient — hardened: invoke with explicit headers + manual fetch fallback + GET ping.
+ * cpClient — extra safety: normalize to envelope on the client as well.
+ * If the server ever returns a raw OpenAI completion, we extract content and wrap it.
  */
 import { createClient } from "@supabase/supabase-js";
 
@@ -22,7 +23,52 @@ export function getCpChatUrl() {
   return `${url}/functions/v1/cp-chat`;
 }
 
-/** GET ping that avoids preflight (no custom headers). */
+function normalizeEnvelopeFromAny(data: any) {
+  // If already envelope-ish, return as-is
+  if (data && typeof data === "object" && ("reply_to_user" in data || "success" in data)) return data;
+  // If it's a completion, try to unwrap
+  const content = data?.choices?.[0]?.message?.content;
+  if (typeof content === "string" && content.length) {
+    try {
+      const parsed = JSON.parse(content);
+      if (parsed && (parsed.reply_to_user || parsed.success)) return parsed;
+      const reply = parsed?.response || parsed?.reply || parsed?.message || content;
+      return {
+        success: true,
+        mode: "chat",
+        session_id: "unknown",
+        turn_id: crypto.randomUUID?.() ?? Math.random().toString(36).slice(2),
+        reply_to_user: String(reply),
+        confidence: "high",
+        extracted: { tone: "developer", idea: null, name: null, audience: null, features: [], privacy: null, auth: null, deep_work_hours: null },
+        status: { complete: false, missing: [], next_question: null },
+        suggestions: [],
+        error: { code: null, message: null },
+        meta: { conversation_stage: "planning", turn_count: 0 },
+        block: null
+      };
+    } catch {
+      // content not JSON, treat as reply
+      return {
+        success: true,
+        mode: "chat",
+        session_id: "unknown",
+        turn_id: crypto.randomUUID?.() ?? Math.random().toString(36).slice(2),
+        reply_to_user: content.replace(/```/g, ""),
+        confidence: "high",
+        extracted: { tone: "developer", idea: null, name: null, audience: null, features: [], privacy: null, auth: null, deep_work_hours: null },
+        status: { complete: false, missing: [], next_question: null },
+        suggestions: [],
+        error: { code: null, message: null },
+        meta: { conversation_stage: "planning", turn_count: 0 },
+        block: null
+      };
+    }
+  }
+  return data; // fallback
+}
+
+/** GET ping (no preflight) */
 export async function pingCpChat() {
   const endpoint = getCpChatUrl();
   const resp = await fetch(endpoint, { method: "GET" });
@@ -32,19 +78,14 @@ export async function pingCpChat() {
   return { ok: resp.ok, status: resp.status, statusText: resp.statusText, data };
 }
 
-/** Low-level fallback using fetch (adds both Authorization and apikey) */
+/** POST invoke with header hints + fallback */
 async function fetchFallback(body: any) {
   const { url, anon } = getSupabaseEnv();
   const endpoint = `${url}/functions/v1/cp-chat`;
   const resp = await fetch(endpoint, {
     method: "POST",
     mode: "cors",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${anon}`,
-      "apikey": anon,
-      "x-cp-client": "vite-fallback"
-    },
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${anon}`, "apikey": anon, "x-cp-client": "vite-fallback" },
     body: JSON.stringify(body ?? {})
   });
   const text = await resp.text();
@@ -53,39 +94,23 @@ async function fetchFallback(body: any) {
   return { ok: resp.ok, status: resp.status, statusText: resp.statusText, data };
 }
 
-/** Primary path: supabase.functions.invoke with explicit gateway headers; fallback to manual fetch on failure. */
 export async function callCpChat(body: any) {
   const { anon } = getSupabaseEnv();
   const supabase = getSupabaseClient();
-
-  // Try invoke
   try {
     const { data, error } = await supabase.functions.invoke("cp-chat", {
       body: body ?? {},
-      headers: {
-        "Authorization": `Bearer ${anon}`,
-        "apikey": anon
-      }
+      headers: { "Authorization": `Bearer ${anon}`, "apikey": anon }
     });
     if (error) {
-      // Fallback once
-      try {
-        const fb = await fetchFallback(body);
-        if (!fb.ok) return { ok: false, status: fb.status, statusText: fb.statusText, data: { error, fallback: fb.data } };
-        return { ok: true, status: 200, statusText: "OK(fallback)", data: fb.data };
-      } catch (e: any) {
-        return { ok: false, status: 0, statusText: "Fallback exception", data: { error, exception: e?.message } };
-      }
-    }
-    return { ok: true, status: 200, statusText: "OK", data };
-  } catch (e: any) {
-    // Invoke threw; try fallback
-    try {
       const fb = await fetchFallback(body);
-      if (!fb.ok) return { ok: false, status: fb.status, statusText: fb.statusText, data: { exception: e?.message, fallback: fb.data } };
-      return { ok: true, status: 200, statusText: "OK(fallback)", data: fb.data };
-    } catch (e2: any) {
-      return { ok: false, status: 0, statusText: "Invoke+fallback exception", data: { invoke: e?.message, fallback: e2?.message } };
+      if (!fb.ok) return { ok: false, status: fb.status, statusText: fb.statusText, data: { error, fallback: fb.data } };
+      return { ok: true, status: 200, statusText: "OK(fallback)", data: normalizeEnvelopeFromAny(fb.data) };
     }
+    return { ok: true, status: 200, statusText: "OK", data: normalizeEnvelopeFromAny(data) };
+  } catch (e: any) {
+    const fb = await fetchFallback(body);
+    if (!fb.ok) return { ok: false, status: fb.status, statusText: fb.statusText, data: { exception: e?.message, fallback: fb.data } };
+    return { ok: true, status: 200, statusText: "OK(fallback)", data: normalizeEnvelopeFromAny(fb.data) };
   }
 }

@@ -1,14 +1,16 @@
 /**
  * CP Edge Function: cp-chat
- * Fix: Some models reject non-default temperature → prune it per-model.
- *   • Adds a tiny capability map and only sends params models support.
- *   • Keeps robust CORS, GET ping, and rescue parser.
+ * FINAL NORMALIZER + SHORT-CIRCUIT PING
+ *   • Guarantees we NEVER return raw OpenAI completion objects.
+ *   • If user_input === "ping", returns a valid CP envelope without calling OpenAI (smoke test).
+ *   • Adds X-CP-Version header so we can confirm deploy.
  */
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
 const CP_MODEL_DEFAULT = Deno.env.get("CP_MODEL_DEFAULT") ?? "gpt-5";
 const CP_MODEL_MINI = Deno.env.get("CP_MODEL_MINI") ?? "gpt-4.1-mini";
+const CP_VERSION = "m3.7-normalizer";
 
 // —– Capability map —–
 // If a model requires default sampling, mark supports.temperature=false.
@@ -32,7 +34,7 @@ function pickModelAndTemp(intent: "generate_code" | "brainstorm" | "chat") {
   return { model: CP_MODEL_MINI, temperature: 0.3 };
 }
 
-// —– CORS helpers —–
+// — CORS —
 function buildCorsHeaders(req: Request) {
   const origin = req.headers.get("Origin") ?? "*";
   const reqHdrs = req.headers.get("Access-Control-Request-Headers") ?? "authorization, apikey, content-type, x-client-info, x-cp-client";
@@ -41,6 +43,7 @@ function buildCorsHeaders(req: Request) {
   h.set("Vary", "Origin");
   h.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, HEAD");
   h.set("Access-Control-Allow-Headers", reqHdrs);
+  h.set("X-CP-Version", CP_VERSION);
   return h;
 }
 function withCors(req: Request, body: BodyInit | null, init: ResponseInit = {}) {
@@ -50,8 +53,7 @@ function withCors(req: Request, body: BodyInit | null, init: ResponseInit = {}) 
   return new Response(body, { ...init, headers });
 }
 
-// —– utils —–
-
+// — utils —
 function uuid(): string {
   // deno-lint-ignore no-explicit-any
   const cryptoAny = crypto as any;
@@ -63,52 +65,100 @@ function uuid(): string {
   });
 }
 
+type Envelope = {
+  success: boolean;
+  mode: "chat";
+  session_id: string;
+  turn_id: string;
+  reply_to_user: string;
+  confidence: "high" | "medium" | "low";
+  extracted: {
+    tone: "eli5" | "intermediate" | "developer" | null;
+    idea: string | null;
+    name: string | null;
+    audience: string | null;
+    features: string[];
+    privacy: "Private" | "Share via link" | "Public" | null;
+    auth: "Google OAuth" | "Magic email link" | "None (dev only)" | null;
+    deep_work_hours: "0.5" | "1" | "2" | "4+" | null;
+  };
+  status: { complete: boolean; missing: string[]; next_question: string | null };
+  suggestions: string[];
+  error: { code: string | null; message: string | null };
+  meta: { conversation_stage: "discovery" | "planning" | "generating" | "refining"; turn_count: number };
+  block: { language: "lovable-prompt" | "ts" | "js" | "json" | null; content: string | null; copy_safe: boolean } | null;
+};
+
 type ClientPayload = { session_id?: string; turn_count?: number; user_input: string };
 
 const SYS_PROMPT = `You are CP, a senior developer companion specialized in Lovable projects. CRITICAL: Return ONLY valid JSON matching the envelope schema. No prose outside the JSON object. If you cannot comply, return an error envelope.`.trim();
 
-function tryRescueParse(content: string): any | null {
-  try { return JSON.parse(content); } catch {
-    const start = content.indexOf("{");
-    const end = content.lastIndexOf("}");
-    if (start !== -1 && end !== -1 && end > start) {
-      const slice = content.slice(start, end + 1);
-      try { return JSON.parse(slice); } catch { /* fallthrough */ }
-    }
-    return null;
-  }
+function safeEnvelope(partial: Partial<Envelope>): Envelope {
+  return {
+    success: partial.success ?? true,
+    mode: "chat",
+    session_id: partial.session_id ?? uuid(),
+    turn_id: partial.turn_id ?? uuid(),
+    reply_to_user: (partial.reply_to_user ?? "OK.").replace(/```/g, ""),
+    confidence: partial.confidence ?? "high",
+    extracted: partial.extracted ?? { tone: "developer", idea: null, name: null, audience: null, features: [], privacy: null, auth: null, deep_work_hours: null },
+    status: partial.status ?? { complete: false, missing: [], next_question: null },
+    suggestions: partial.suggestions ?? [],
+    error: partial.error ?? { code: null, message: null },
+    meta: partial.meta ?? { conversation_stage: "planning", turn_count: 0 },
+    block: partial.block ?? null
+  };
 }
 
-// —– handler —–
+function tryJSON<T = any>(s: string): T | null { try { return JSON.parse(s) as T; } catch { return null; } }
+
+function normalizeFromModel(content: string, session_id: string, turn_id: string, turn_count: number): Envelope {
+  const parsed = tryJSON(content);
+  if (parsed && typeof parsed === "object" && ("reply_to_user" in parsed || "success" in parsed)) {
+    return safeEnvelope({
+      ...parsed,
+      session_id: parsed.session_id ?? session_id,
+      turn_id: parsed.turn_id ?? turn_id,
+      meta: parsed.meta ?? { conversation_stage: "planning", turn_count }
+    });
+  }
+  const reply = (parsed && (parsed.response || parsed.reply || parsed.message)) || content;
+  return safeEnvelope({
+    session_id, turn_id,
+    reply_to_user: String(reply),
+    meta: { conversation_stage: "planning", turn_count }
+  });
+}
+
 Deno.serve(async (req) => {
   const url = new URL(req.url);
 
-  // Preflight
-  if (req.method === "OPTIONS") {
-    return withCors(req, "ok", { status: 200, headers: { "Content-Type": "text/plain" } });
-  }
-
-  // Health/ping
+  if (req.method === "OPTIONS") return withCors(req, "ok", { status: 200, headers: { "Content-Type": "text/plain" } });
   if (req.method === "GET" || req.method === "HEAD") {
-    const body = req.method === "HEAD" ? null : JSON.stringify({ ok: true, fn: "cp-chat", path: url.pathname, time: new Date().toISOString() });
+    const body = req.method === "HEAD" ? null : JSON.stringify({ ok: true, fn: "cp-chat", path: url.pathname, time: new Date().toISOString(), version: CP_VERSION });
     return withCors(req, body, { status: 200, headers: { "Content-Type": "application/json" } });
   }
+  if (req.method !== "POST") return withCors(req, JSON.stringify({ error: { code: "METHOD_NOT_ALLOWED", message: "Use POST" } }), { status: 405 });
+  if (!OPENAI_API_KEY) return withCors(req, JSON.stringify({ error: { code: "MISSING_OPENAI_KEY", message: "OPENAI_API_KEY not set" } }), { status: 500 });
 
-  if (req.method !== "POST") {
-    return withCors(req, JSON.stringify({ error: { code: "METHOD_NOT_ALLOWED", message: "Use POST" } }), { status: 405 });
-  }
-  if (!OPENAI_API_KEY) {
-    return withCors(req, JSON.stringify({ error: { code: "MISSING_OPENAI_KEY", message: "OPENAI_API_KEY not set" } }), { status: 500 });
-  }
-
-  let payload: ClientPayload;
-  try { payload = await req.json(); } catch { payload = { user_input: "" }; }
+  let payload: ClientPayload; try { payload = await req.json(); } catch { payload = { user_input: "" }; }
 
   const session_id = payload.session_id ?? uuid();
   const turn_id = uuid();
+  const turn_count = payload.turn_count ?? 0;
   const userText = (payload.user_input ?? "").toString().slice(0, 8000);
 
-  // Choose model & desired temp by intent, then prune unsupported
+  // Short-circuit PING for deterministic verification
+  if (userText.trim().toLowerCase() === "ping") {
+    const env = safeEnvelope({
+      success: true,
+      session_id, turn_id,
+      reply_to_user: "pong",
+      meta: { conversation_stage: "planning", turn_count }
+    });
+    return withCors(req, JSON.stringify(env), { status: 200 });
+  }
+
   const intent = detectIntent(userText);
   const pick = pickModelAndTemp(intent);
   const caps = MODEL_CAPS[pick.model] ?? { supports: { temperature: false, top_p: false } };
@@ -118,14 +168,12 @@ Deno.serve(async (req) => {
     { role: "user", content: JSON.stringify({ session_id, turn_id, user_input: userText }) }
   ];
 
-  // Build request body, conditionally adding temperature/top_p
   const body: Record<string, unknown> = {
     model: pick.model,
     messages,
     response_format: { type: "json_object" }
   };
   if (caps.supports.temperature) body.temperature = pick.temperature;
-  // We currently avoid top_p for safety unless you flip the cap on a given model.
 
   try {
     const resp = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -133,27 +181,43 @@ Deno.serve(async (req) => {
       headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
       body: JSON.stringify(body)
     });
-    const text = await resp.text();
-    const parsed = tryRescueParse(text);
-    if (!resp.ok || !parsed) {
-      return withCors(req, JSON.stringify({
+
+    const raw = await resp.text();
+    if (!resp.ok) {
+      return withCors(req, JSON.stringify(safeEnvelope({
         success: false,
-        mode: "chat",
         session_id, turn_id,
-        reply_to_user: "I had trouble processing the model reply.",
+        reply_to_user: "I had trouble talking to the model.",
         confidence: "low",
-        error: { code: "INVALID_JSON_OR_OPENAI_ERROR", message: text }
-      }), { status: 200 });
+        error: { code: "OPENAI_API_ERROR", message: raw },
+        meta: { conversation_stage: "planning", turn_count }
+      })), { status: 200 });
     }
-    return withCors(req, JSON.stringify(parsed), { status: 200 });
+
+    const completion = tryJSON<any>(raw);
+    const content = completion?.choices?.[0]?.message?.content;
+    if (typeof content !== "string" || !content.length) {
+      return withCors(req, JSON.stringify(safeEnvelope({
+        success: false,
+        session_id, turn_id,
+        reply_to_user: "Model returned an empty message.",
+        confidence: "low",
+        error: { code: "EMPTY_CONTENT", message: raw },
+        meta: { conversation_stage: "planning", turn_count }
+      })), { status: 200 });
+    }
+
+    const envelope = normalizeFromModel(content, session_id, turn_id, turn_count);
+    return withCors(req, JSON.stringify(envelope), { status: 200 });
+
   } catch (err) {
-    return withCors(req, JSON.stringify({
+    return withCors(req, JSON.stringify(safeEnvelope({
       success: false,
-      mode: "chat",
       session_id, turn_id,
       reply_to_user: "I had trouble reaching the model.",
       confidence: "low",
-      error: { code: "EDGE_RUNTIME_ERROR", message: String(err?.message ?? err) }
-    }), { status: 200 });
+      error: { code: "EDGE_RUNTIME_ERROR", message: String(err?.message ?? err) },
+      meta: { conversation_stage: "planning", turn_count }
+    })), { status: 200 });
   }
 });
