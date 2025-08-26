@@ -10,7 +10,7 @@ const ENV_OPENAI = Deno.env.get("OPENAI_API_KEY");
 const DEV_UNSAFE_ALLOW_KEY = (Deno.env.get("DEV_UNSAFE_ALLOW_KEY") ?? "false").toLowerCase() === "true";
 const CP_MODEL_DEFAULT = Deno.env.get("CP_MODEL_DEFAULT") ?? "gpt-5";
 const CP_MODEL_MINI = Deno.env.get("CP_MODEL_MINI") ?? "gpt-4.1-mini";
-const CP_VERSION = "m3.10-reply-string";
+const CP_VERSION = "m3.11-text-alias";
 
 const MODEL_CAPS: Record<string, { supports: { temperature: boolean; top_p: boolean } }> = {
   "gpt-5": { supports: { temperature: false, top_p: false } },
@@ -122,6 +122,8 @@ function safeEnvelope(partial: Partial<Envelope>): Envelope {
 
 function normalizeFromModel(content: string, session_id: string, turn_id: string, turn_count: number): Envelope {
   const parsed = tryJSON(content);
+  
+  // If already our envelope, sanitize & return
   if (parsed && typeof parsed === "object" && ("reply_to_user" in parsed || "success" in parsed)) {
     const env = safeEnvelope({
       ...parsed,
@@ -132,6 +134,14 @@ function normalizeFromModel(content: string, session_id: string, turn_id: string
     // Ensure reply_to_user is a clean string even if original was object
     return { ...env, reply_to_user: toText(env.reply_to_user).replace(/```/g, "") };
   }
+
+  // NEW: treat {text, type} as plain reply
+  if (parsed && typeof parsed === "object" && "text" in parsed) {
+    const txt = parsed.text;
+    return safeEnvelope({ session_id, turn_id, reply_to_user: toText(txt), meta: { conversation_stage: "planning", turn_count } });
+  }
+
+  // Legacy aliases
   const reply = (parsed && (parsed.response || parsed.reply || parsed.message)) || content;
   return safeEnvelope({ session_id, turn_id, reply_to_user: toText(reply), meta: { conversation_stage: "planning", turn_count } });
 }
