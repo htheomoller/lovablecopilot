@@ -1,7 +1,9 @@
-# M3 — Vite client hardening for 404s
-- Added `src/lib/cpClient.ts` to normalize the cp-chat endpoint and set required headers (Authorization and apikey with the anon key).
-- Reworked `src/pages/Chat.tsx` to use the shared client, and added a "Ping cp-chat" diagnostic with live endpoint echo and response preview.
-- Updated `.env.example` for VITE_ variables (Vite) and clarified that OPENAI_API_KEY lives in Supabase function secrets.
+# M3 — Automatic temperature + model switching
+- Updated cp-chat Edge Function to auto-detect intent (generate_code, brainstorm, chat).
+- Routes to GPT-5 for code-heavy turns (no temperature - model default), GPT-4o-mini for brainstorm (temp 0.8) and casual chat (temp 0.3).
+- Added proper capability map to avoid sending unsupported params (no temperature/top_p to GPT-5, proper max_completion_tokens usage).
+- Fixed OpenAI API parameter compatibility issues.
+- Still returns JSON envelope only, safe for Lovable.
 
 ## If you still get 404
 1. **Confirm envs are loaded in Vite** (restart dev server/build):

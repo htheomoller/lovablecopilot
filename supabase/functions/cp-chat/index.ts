@@ -1,18 +1,27 @@
 /**
  * CP Edge Function: cp-chat
- * Receives a user message and returns a CP JSON envelope.
- * First iteration: single-model (gpt-5), deterministic defaults for code-friendly replies.
- * Schema strictly enforced: returns only valid JSON envelope or a safe error envelope.
- * 
- * Env:
- * - OPENAI_API_KEY (required)
- * - CP_MODEL_DEFAULT (optional, default: gpt-5-2025-08-07)
- * 
- * Notes:
- * - We'll add model routing + usage counters in a later patch (per your instruction).
+ * Now with automatic temperature + model switching.
+ *   • Chooses model based on intent (light vs heavy).
+ *   • Adjusts temperature for code vs brainstorm vs plain chat.
+ *   • Prunes unsupported params automatically per model.
  */
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+
+const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
+
+// Capability map: newer models don't support temperature or top_p
+const MODEL_CAPS: Record<string, { supports: { temperature: boolean; top_p: boolean; max_completion_tokens: boolean } }> = {
+  "gpt-5-2025-08-07": { supports: { temperature: false, top_p: false, max_completion_tokens: true } },
+  "gpt-4.1-2025-04-14": { supports: { temperature: false, top_p: false, max_completion_tokens: true } },
+  "gpt-4.1-mini-2025-04-14": { supports: { temperature: false, top_p: false, max_completion_tokens: true } },
+  "gpt-4o-mini": { supports: { temperature: true, top_p: true, max_completion_tokens: false } }
+};
 
 type Envelope = {
   success: boolean;
@@ -61,13 +70,72 @@ type ClientPayload = {
   tone?: "eli5" | "intermediate" | "developer";
 };
 
-const CP_MODEL_DEFAULT = Deno.env.get("CP_MODEL_DEFAULT") ?? "gpt-5-2025-08-07";
-const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
+function uuid(): string {
+  // Simple UUID v4 generator
+  const cryptoAny = crypto as any;
+  if (cryptoAny.randomUUID) return cryptoAny.randomUUID();
+  const tpl = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx";
+  return tpl.replace(/[xy]/g, c => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-};
+// Determine intent from user text
+function detectIntent(userText: string): "generate_code" | "brainstorm" | "chat" {
+  const t = userText.toLowerCase();
+  if (t.includes("code") || t.includes("patch") || t.includes("prompt") || t.includes("implement") || t.includes("build") || t.includes("create")) return "generate_code";
+  if (t.includes("idea") || t.includes("name") || t.includes("brainstorm") || t.includes("suggest")) return "brainstorm";
+  return "chat";
+}
+
+// Route model + temperature based on intent
+function pickModelAndSampling(intent: "generate_code" | "brainstorm" | "chat") {
+  if (intent === "generate_code") {
+    return { model: "gpt-5-2025-08-07", temperature: 0.2 };
+  }
+  if (intent === "brainstorm") {
+    return { model: "gpt-4o-mini", temperature: 0.8 };
+  }
+  return { model: "gpt-4o-mini", temperature: 0.3 };
+}
+
+function safeEnvelopeFallback(payload: ClientPayload, message: string): Envelope {
+  return {
+    success: false,
+    mode: "chat",
+    session_id: payload.session_id ?? "unknown",
+    turn_id: uuid(),
+    reply_to_user: "I had trouble processing that. Please rephrase.",
+    confidence: "low",
+    extracted: {
+      tone: payload.tone ?? "developer",
+      idea: null,
+      name: null,
+      audience: null,
+      features: [],
+      privacy: null,
+      auth: null,
+      deep_work_hours: null
+    },
+    status: {
+      complete: false,
+      missing: [],
+      next_question: null
+    },
+    suggestions: ["Try again", "Rephrase", "Give an example"],
+    error: {
+      code: "EDGE_FUNCTION_ERROR",
+      message
+    },
+    meta: {
+      conversation_stage: "planning",
+      turn_count: payload.turn_count ?? 0
+    },
+    block: null
+  };
+}
 
 const SYS_PROMPT = `
 You are CP, a senior developer companion specialized in Lovable projects.
@@ -119,54 +187,6 @@ Rules:
 - Never include markdown fences or backticks anywhere.
 `.trim();
 
-function uuid(): string {
-  // Simple UUID v4 generator
-  const cryptoAny = crypto as any;
-  if (cryptoAny.randomUUID) return cryptoAny.randomUUID();
-  const tpl = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx";
-  return tpl.replace(/[xy]/g, c => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === "x" ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-}
-
-function safeEnvelopeFallback(payload: ClientPayload, message: string): Envelope {
-  return {
-    success: false,
-    mode: "chat",
-    session_id: payload.session_id ?? "unknown",
-    turn_id: uuid(),
-    reply_to_user: "I had trouble processing that. Please rephrase.",
-    confidence: "low",
-    extracted: {
-      tone: payload.tone ?? "developer",
-      idea: null,
-      name: null,
-      audience: null,
-      features: [],
-      privacy: null,
-      auth: null,
-      deep_work_hours: null
-    },
-    status: {
-      complete: false,
-      missing: [],
-      next_question: null
-    },
-    suggestions: ["Try again", "Rephrase", "Give an example"],
-    error: {
-      code: "EDGE_FUNCTION_ERROR",
-      message
-    },
-    meta: {
-      conversation_stage: "planning",
-      turn_count: payload.turn_count ?? 0
-    },
-    block: null
-  };
-}
-
 serve(async (req) => {
   // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
@@ -206,6 +226,12 @@ serve(async (req) => {
 
   console.log(`CP Chat - Session: ${session_id}, Turn: ${turn_id}, User: ${userText.substring(0, 100)}...`);
 
+  const intent = detectIntent(userText);
+  const { model, temperature } = pickModelAndSampling(intent);
+  const caps = MODEL_CAPS[model] ?? { supports: { temperature: false, top_p: false, max_completion_tokens: true } };
+
+  console.log(`Intent: ${intent}, Model: ${model}, Temperature: ${temperature}`);
+
   const messages = [
     { role: "system", content: SYS_PROMPT },
     {
@@ -221,6 +247,26 @@ serve(async (req) => {
     }
   ];
 
+  // Build request body with supported parameters only
+  const body: any = { 
+    model, 
+    messages, 
+    response_format: { type: "json_object" } 
+  };
+
+  // Add parameters based on model capabilities
+  if (caps.supports.temperature) {
+    body.temperature = temperature;
+  }
+  if (caps.supports.top_p) {
+    body.top_p = 0.9;
+  }
+  if (caps.supports.max_completion_tokens) {
+    body.max_completion_tokens = 2000;
+  } else {
+    body.max_tokens = 2000;
+  }
+
   try {
     const resp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -228,13 +274,7 @@ serve(async (req) => {
         "Authorization": `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({
-        model: CP_MODEL_DEFAULT,
-        messages,
-        max_completion_tokens: 2000,
-        top_p: 0.9,
-        response_format: { type: "json_object" }
-      })
+      body: JSON.stringify(body)
     });
 
     if (!resp.ok) {
@@ -291,7 +331,7 @@ serve(async (req) => {
       envelope.reply_to_user = envelope.reply_to_user.replace(/```/g, "");
     }
 
-    console.log(`CP Chat response - Success: ${envelope.success}, Stage: ${envelope.meta.conversation_stage}`);
+    console.log(`CP Chat response - Success: ${envelope.success}, Stage: ${envelope.meta.conversation_stage}, Intent: ${intent}`);
 
     return new Response(JSON.stringify(envelope), {
       status: 200,
