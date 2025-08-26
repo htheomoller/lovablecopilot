@@ -1,13 +1,36 @@
 /**
  * CP Edge Function: cp-chat
- * CORS v2 + GET ping + robust preflight.
- *   • Reflects Access-Control-Request-Headers dynamically (avoids preflight 0/Failed-to-fetch).
- *   • Handles GET/HEAD/OPTIONS for connectivity checks (no custom headers needed).
- *   • Keeps stricter JSON-only contract and rescue parser for POST.
+ * Fix: Some models reject non-default temperature → prune it per-model.
+ *   • Adds a tiny capability map and only sends params models support.
+ *   • Keeps robust CORS, GET ping, and rescue parser.
  */
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
+const CP_MODEL_DEFAULT = Deno.env.get("CP_MODEL_DEFAULT") ?? "gpt-5";
+const CP_MODEL_MINI = Deno.env.get("CP_MODEL_MINI") ?? "gpt-4.1-mini";
+
+// —– Capability map —–
+// If a model requires default sampling, mark supports.temperature=false.
+const MODEL_CAPS: Record<string, { supports: { temperature: boolean; top_p: boolean } }> = {
+  "gpt-5": { supports: { temperature: false, top_p: false } },
+  "gpt-4.1-mini": { supports: { temperature: true, top_p: true } }
+};
+
+// Intent detection (very light)
+function detectIntent(text: string): "generate_code" | "brainstorm" | "chat" {
+  const t = (text || "").toLowerCase();
+  if (t.includes("code") || t.includes("patch") || t.includes("prompt")) return "generate_code";
+  if (t.includes("idea") || t.includes("brainstorm") || t.includes("name")) return "brainstorm";
+  return "chat";
+}
+
+// Route model + (desired) temperature; we will prune unsupported later.
+function pickModelAndTemp(intent: "generate_code" | "brainstorm" | "chat") {
+  if (intent === "generate_code") return { model: CP_MODEL_DEFAULT, temperature: 0.2 };
+  if (intent === "brainstorm") return { model: CP_MODEL_MINI, temperature: 0.8 };
+  return { model: CP_MODEL_MINI, temperature: 0.3 };
+}
 
 // —– CORS helpers —–
 function buildCorsHeaders(req: Request) {
@@ -18,14 +41,11 @@ function buildCorsHeaders(req: Request) {
   h.set("Vary", "Origin");
   h.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, HEAD");
   h.set("Access-Control-Allow-Headers", reqHdrs);
-  // If you later rely on cookies, flip this to 'true' and set explicit origin.
-  // h.set("Access-Control-Allow-Credentials", "true");
   return h;
 }
 function withCors(req: Request, body: BodyInit | null, init: ResponseInit = {}) {
   const headers = new Headers(init.headers || {});
-  const cors = buildCorsHeaders(req);
-  cors.forEach((v, k) => headers.set(k, v));
+  buildCorsHeaders(req).forEach((v, k) => headers.set(k, v));
   if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   return new Response(body, { ...init, headers });
 }
@@ -68,7 +88,7 @@ Deno.serve(async (req) => {
     return withCors(req, "ok", { status: 200, headers: { "Content-Type": "text/plain" } });
   }
 
-  // Lightweight health/ping (no custom headers required)
+  // Health/ping
   if (req.method === "GET" || req.method === "HEAD") {
     const body = req.method === "HEAD" ? null : JSON.stringify({ ok: true, fn: "cp-chat", path: url.pathname, time: new Date().toISOString() });
     return withCors(req, body, { status: 200, headers: { "Content-Type": "application/json" } });
@@ -88,21 +108,30 @@ Deno.serve(async (req) => {
   const turn_id = uuid();
   const userText = (payload.user_input ?? "").toString().slice(0, 8000);
 
+  // Choose model & desired temp by intent, then prune unsupported
+  const intent = detectIntent(userText);
+  const pick = pickModelAndTemp(intent);
+  const caps = MODEL_CAPS[pick.model] ?? { supports: { temperature: false, top_p: false } };
+
   const messages = [
     { role: "system", content: SYS_PROMPT },
     { role: "user", content: JSON.stringify({ session_id, turn_id, user_input: userText }) }
   ];
 
+  // Build request body, conditionally adding temperature/top_p
+  const body: Record<string, unknown> = {
+    model: pick.model,
+    messages,
+    response_format: { type: "json_object" }
+  };
+  if (caps.supports.temperature) body.temperature = pick.temperature;
+  // We currently avoid top_p for safety unless you flip the cap on a given model.
+
   try {
     const resp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "gpt-5",
-        messages,
-        temperature: 0.3,
-        response_format: { type: "json_object" }
-      })
+      body: JSON.stringify(body)
     });
     const text = await resp.text();
     const parsed = tryRescueParse(text);

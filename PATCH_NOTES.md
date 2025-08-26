@@ -1,14 +1,17 @@
-# M3 — Robust CORS + GET ping + better diagnostics
-- Edge Function now:
-  - Reflects Access-Control-Request-Headers in Access-Control-Allow-Headers.
-  - Handles OPTIONS, GET, HEAD, and POST in one file.
-  - Provides a GET /functions/v1/cp-chat health response to avoid preflight during diagnostics.
-- Client:
-  - Added pingCpChat() (GET) then POST to show both results in the diagnostics box.
-  - Hardened error handling for invoke + fallback.
-- This should eliminate "Failed to fetch (status 0)" caused by strict preflight header mismatches.
+# M3 — Fix "temperature unsupported" (auto-prune per model) + keep CORS/JSON rescue
+- Added a capability map and only include temperature when the chosen model supports it.
+- Default routing:
+  - gpt-5 for code-heavy turns (no temperature param sent).
+  - gpt-4.1-mini for brainstorm/chat (sends temperature).
+- Preserves robust CORS (OPTIONS/GET/HEAD/POST) and strict JSON/rescue parsing.
 
-## If you still see failures
-- Try clicking "Ping cp-chat" and share the GET/POST pair shown in the diagnostics box.
-- If GET succeeds but POST fails, it's definitely a preflight issue; we can then lock the allowed headers to the exact set your browser sends (the reflection already does this).
-- If both fail, we'll take an alternative route (proxy via a small Cloudflare Worker or Supabase Realtime Relay) — say the word and I'll ship that fallback.
+## Deploy
+```
+supabase functions deploy cp-chat --no-verify-jwt --project-ref <YOUR_PROJECT_REF>
+```
+
+## Notes
+- You can override models via env:
+  - CP_MODEL_DEFAULT (default: gpt-5)
+  - CP_MODEL_MINI (default: gpt-4.1-mini)
+- If OpenAI changes capabilities, update MODEL_CAPS.
