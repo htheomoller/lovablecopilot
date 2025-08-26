@@ -1,8 +1,9 @@
 /**
  * CP Edge Function: cp-chat
- * Patch: ALWAYS return a string in reply_to_user.
- *   • Adds toText() and uses it in safeEnvelope() + normalizeFromModel().
- *   • Prevents [object Object] bubbles even if the model outputs structured content.
+ * One-shot fix: unwrap JSON-looking strings into plain text.
+ *   • If model returns a JSON string like {"message":"…"} we parse+extract the inner text.
+ *   • Preserves universal extractor for arrays/objects and envelope passthrough.
+ * Version: m3.14-unwrap-jsontext
  */
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
@@ -10,7 +11,7 @@ const ENV_OPENAI = Deno.env.get("OPENAI_API_KEY");
 const DEV_UNSAFE_ALLOW_KEY = (Deno.env.get("DEV_UNSAFE_ALLOW_KEY") ?? "false").toLowerCase() === "true";
 const CP_MODEL_DEFAULT = Deno.env.get("CP_MODEL_DEFAULT") ?? "gpt-5";
 const CP_MODEL_MINI = Deno.env.get("CP_MODEL_MINI") ?? "gpt-4.1-mini";
-const CP_VERSION = "m3.12-content-array";
+const CP_VERSION = "m3.14-unwrap-jsontext";
 
 const MODEL_CAPS: Record<string, { supports: { temperature: boolean; top_p: boolean } }> = {
   "gpt-5": { supports: { temperature: false, top_p: false } },
@@ -59,19 +60,15 @@ function uuid(): string {
     return v.toString(16);
   });
 }
-
-/** Coerce any value to a user-friendly string for chat bubbles. */
+function tryJSON<T = any>(s: string): T | null { try { return JSON.parse(s) as T; } catch { return null; } }
+function stripFences(s: string): string { return s.replace(/```[\s\S]*?\n/g, "").replace(/```/g, ""); }
 function toText(v: unknown): string {
   if (v == null) return "";
-  if (typeof v === "string") return v;
+  if (typeof v === "string") return stripFences(v);
   try {
     const s = JSON.stringify(v);
-    if (!s) return String(v);
-    // Short objects one-line; large as pretty JSON
     return s.length <= 200 ? s : JSON.stringify(v, null, 2);
-  } catch {
-    return String(v);
-  }
+  } catch { return String(v); }
 }
 
 type Envelope = {
@@ -100,16 +97,80 @@ type Envelope = {
 
 type ClientPayload = { session_id?: string; turn_count?: number; user_input: string; openai_api_key?: string };
 
-const SYS_PROMPT = `You are CP, a senior developer companion specialized in Lovable projects. CRITICAL: Return ONLY valid JSON matching the envelope schema. No prose outside the JSON object. If you cannot comply, return an error envelope.`.trim();
+// ––––– Universal extraction helpers –––––
+function normalizeIfEnvelope(obj: Record<string, unknown>): Envelope | null {
+  const looksLike = "reply_to_user" in obj || "success" in obj;
+  if (!looksLike) return null;
+  const env = safeEnvelope(obj as Partial<Envelope>);
+  env.reply_to_user = toText(env.reply_to_user);
+  return env;
+}
 
-function tryJSON<T = any>(s: string): T | null { try { return JSON.parse(s) as T; } catch { return null; } }
+/** Pull human-readable text from any shape (string/object/array). */
+function extractHumanTextLike(value: unknown): string {
+  // Strings: maybe JSON-wrapped
+  if (typeof value === "string") {
+    // If string looks like JSON, parse & recurse
+    const trimmed = value.trim();
+    if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+      const maybe = tryJSON(trimmed);
+      if (maybe) return extractHumanTextLike(maybe);
+    }
+    return toText(value);
+  }
+
+  // Arrays: flatten elements
+  if (Array.isArray(value)) {
+    const parts = value.map(extractHumanTextLike).filter(Boolean);
+    const joined = parts.join("\n").trim();
+    if (joined) return joined;
+    return "";
+  }
+
+  // Objects: envelope → passthrough; else pick best field(s)
+  if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+
+    // Envelope passthrough
+    const env = normalizeIfEnvelope(obj);
+    if (env) return env.reply_to_user;
+
+    // Priority direct keys
+    const priority = ["reply_to_user", "text", "message", "content", "output_text", "value"];
+    for (const k of priority) {
+      const v = obj[k];
+      if (typeof v === "string" && v) return toText(v);
+    }
+
+    // Common containers: flatten contents
+    const containers = ["parts", "outputs", "choices", "data", "messages", "items"];
+    for (const k of containers) {
+      const v = obj[k];
+      if (Array.isArray(v)) {
+        const joined = v.map(extractHumanTextLike).join("\n").trim();
+        if (joined) return joined;
+      }
+    }
+
+    // Single-string-field shortcut
+    const stringFields = Object.entries(obj).filter(([, v]) => typeof v === "string") as Array<[string, string]>;
+    if (stringFields.length === 1) return toText(stringFields[0][1]);
+
+    // Last resort: stringify
+    return toText(obj);
+  }
+
+  return toText(value);
+}
+
+/** Build a safe envelope (always string reply). */
 function safeEnvelope(partial: Partial<Envelope>): Envelope {
   return {
     success: partial.success ?? true,
     mode: "chat",
     session_id: partial.session_id ?? uuid(),
     turn_id: partial.turn_id ?? uuid(),
-    reply_to_user: toText(partial.reply_to_user ?? "OK.").replace(/```/g, ""),
+    reply_to_user: toText(partial.reply_to_user ?? "OK."),
     confidence: partial.confidence ?? "high",
     extracted: partial.extracted ?? { tone: "developer", idea: null, name: null, audience: null, features: [], privacy: null, auth: null, deep_work_hours: null },
     status: partial.status ?? { complete: false, missing: [], next_question: null },
@@ -120,50 +181,31 @@ function safeEnvelope(partial: Partial<Envelope>): Envelope {
   };
 }
 
-function normalizeFromModel(content: string, session_id: string, turn_id: string, turn_count: number): Envelope {
-  const parsed = tryJSON(content);
+/** Normalize any model-produced content into our envelope. */
+function normalizeFromModelContent(contentAny: unknown, session_id: string, turn_id: string, turn_count: number): Envelope {
+  // First extraction
+  let text = extractHumanTextLike(contentAny);
 
-  // Envelope passthrough
-  if (parsed && typeof parsed === "object" && ("reply_to_user" in parsed || "success" in parsed)) {
-    const env = safeEnvelope({ ...parsed, session_id, turn_id, meta: parsed.meta ?? { conversation_stage: "planning", turn_count } });
-    return { ...env, reply_to_user: toText(env.reply_to_user).replace(/```/g, "") };
+  // EXTRA: If the result itself still looks like a JSON string with {message|text|reply_to_user}, unwrap again.
+  const trimmed = text.trim();
+  if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+    const parsed = tryJSON(trimmed);
+    if (parsed && typeof parsed === "object") {
+      const inner = extractHumanTextLike(parsed);
+      if (inner && inner !== text) text = inner;
+    }
   }
 
-  // Recognize {text, type}
-  if (parsed && typeof parsed === "object" && "text" in parsed) {
-    return safeEnvelope({ session_id, turn_id, reply_to_user: toText(parsed.text), meta: { conversation_stage: "planning", turn_count } });
-  }
-
-  // Legacy aliases
-  const reply = (parsed && (parsed.response || parsed.reply || parsed.message)) || content;
-  return safeEnvelope({ session_id, turn_id, reply_to_user: toText(reply), meta: { conversation_stage: "planning", turn_count } });
+  return safeEnvelope({
+    success: true,
+    mode: "chat",
+    session_id, turn_id,
+    reply_to_user: text,
+    meta: { conversation_stage: "planning", turn_count }
+  });
 }
 
-/** NEW: flatten structured message.content from OpenAI (arrays/objects) into a string */
-function flattenMessageContent(msg: any): string | null {
-  const c = msg?.content;
-  if (typeof c === "string") return c;
-  // Array of parts: take .text or .content from each
-  if (Array.isArray(c)) {
-    const pieces = c.map((p: any) => {
-      if (typeof p === "string") return p;
-      if (p && typeof p === "object") {
-        // common shapes: {type:"output_text"| "text" , text:"…"}, {text:"…"}
-        if (typeof p.text === "string") return p.text;
-        if (typeof p.content === "string") return p.content;
-      }
-      return "";
-    }).filter(Boolean);
-    const joined = pieces.join("\n").trim();
-    return joined.length ? joined : null;
-  }
-  // Object with text/content
-  if (c && typeof c === "object") {
-    if (typeof c.text === "string") return c.text;
-    if (typeof c.content === "string") return c.content;
-  }
-  return null;
-}
+const SYS_PROMPT = `You are CP, a senior developer companion specialized in Lovable projects. CRITICAL: Return ONLY valid JSON matching the envelope schema. No prose outside the JSON object. If you cannot comply, return an error envelope.`.trim();
 
 // —– handler —–
 Deno.serve(async (req) => {
@@ -231,25 +273,16 @@ Deno.serve(async (req) => {
         meta: { conversation_stage: "planning", turn_count }
       })), { status: 200 });
     }
-    const completion = tryJSON(raw);
+    // Support classic and structured responses
+    const completion = tryJSON<any>(raw);
     const msg = completion?.choices?.[0]?.message;
-    let content: string | null = flattenMessageContent(msg);
-    if (!content || !content.length) {
-      // Fallback to raw string content if any
-      if (typeof msg?.content === "string") content = msg.content;
+    let contentAny: unknown = msg?.content;
+    if (contentAny === undefined && msg && typeof msg === "object") {
+      contentAny = (msg as any).text ?? (msg as any).content ?? (msg as any).message;
     }
-    if (!content || !content.length) {
-      return withCors(req, JSON.stringify(safeEnvelope({
-        success: false, session_id, turn_id,
-        reply_to_user: "Model returned an empty message.",
-        confidence: "low",
-        error: { code: "EMPTY_CONTENT", message: raw },
-        meta: { conversation_stage: "planning", turn_count }
-      })), { status: 200 });
-    }
+    if (contentAny === undefined) contentAny = msg ?? raw;
 
-    const envelope = normalizeFromModel(content, session_id, turn_id, turn_count);
-    envelope.reply_to_user = toText(envelope.reply_to_user).replace(/```/g, "");
+    const envelope = normalizeFromModelContent(contentAny, session_id, turn_id, turn_count);
     return withCors(req, JSON.stringify(envelope), { status: 200 });
   } catch (err) {
     return withCors(req, JSON.stringify(safeEnvelope({

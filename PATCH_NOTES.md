@@ -1,15 +1,8 @@
-# M3 — Flatten structured message.content (arrays/objects) → plain text
+# M3 — Unwrap JSON-looking strings (final polish)
 
-## Problem
-Some OpenAI responses use structured content (arrays of parts or {type, text} objects). Those slipped through as {"text":"…"}.
-
-## Fix
-`flattenMessageContent()` now:
-- Joins arrays of parts using each part's .text or .content.
-- Reads object content via .text or .content.
-- Falls back to string message.content when present.
-
-We still normalize any JSON-shaped text the model returns (envelopes, {response:…}, {text:…}) and guarantee reply_to_user is a string.
+**Symptom:** Chat bubble still shows {"message":"…"} blobs.
+**Root cause:** The model sometimes returns a JSON string containing {message|text|...}; earlier logic extracted objects/arrays but didn't always re-parse strings that look like JSON.
+**Fix:** When the intermediate result is a JSON-looking string, we parse it and extract human text again using the universal extractor.
 
 ## Deploy
 ```
@@ -17,5 +10,6 @@ supabase functions deploy cp-chat --no-verify-jwt --project-ref <YOUR_PROJECT_RE
 ```
 
 ## Verify
-- Network → Response headers show `X-CP-Version: m3.12-content-array`.
-- Ask "help me build a to-do app" → the bubble shows a clean sentence/code snippet, not a JSON object.
+- Network headers show `X-CP-Version: m3.14-unwrap-jsontext`.
+- Ask "help me build a to-do app" → bubble shows clean natural text (no JSON wrapper).
+- Ping still returns `{ reply_to_user: "pong", ... }`.
