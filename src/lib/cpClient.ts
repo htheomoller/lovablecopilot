@@ -1,14 +1,24 @@
 /**
- * cpClient — tiny helper to call the cp-chat Edge Function from a Vite app.
- * Normalizes URL, sets required headers, and provides a ping method for diagnostics.
+ * cpClient — Supabase client wrapper for calling Edge Functions safely from Vite.
+ * Uses supabase-js functions.invoke to avoid CORS/preflight gotchas.
  */
+import { createClient } from "@supabase/supabase-js";
+
 export function getSupabaseEnv() {
   const url = import.meta.env.VITE_SUPABASE_URL as string | undefined;
   const anon = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
   return {
-    url: url ? url.replace(/\/+$/, '') : "",
+    url: (url ?? "").replace(/\/+$/, ""),
     anon: anon ?? ""
   };
+}
+
+export function getSupabaseClient() {
+  const { url, anon } = getSupabaseEnv();
+  return createClient(url, anon, {
+    auth: { persistSession: false },
+    global: { headers: { "x-cp-client": "vite" } }
+  });
 }
 
 export function getCpChatUrl() {
@@ -16,20 +26,22 @@ export function getCpChatUrl() {
   return `${url}/functions/v1/cp-chat`;
 }
 
+/** Invoke cp-chat via supabase-js. Returns { ok, status, statusText, data }. */
 export async function callCpChat(body: any) {
-  const { anon } = getSupabaseEnv();
-  const resp = await fetch(getCpChatUrl(), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      // Both required on hosted Supabase Functions
-      "Authorization": `Bearer ${anon}`,
-      "apikey": anon
-    },
-    body: JSON.stringify(body ?? {})
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase.functions.invoke("cp-chat", {
+    body: body ?? {},
   });
-  const text = await resp.text();
-  let json: any = null;
-  try { json = JSON.parse(text); } catch { /* keep text raw for debug */ }
-  return { ok: resp.ok, status: resp.status, statusText: resp.statusText, data: json ?? text };
+
+  if (error) {
+    // Mirror fetch-like shape for the UI
+    return {
+      ok: false,
+      status: error.status ?? 0,
+      statusText: error.message ?? "Invoke error",
+      data: { error }
+    };
+  }
+  // cp-chat always returns JSON
+  return { ok: true, status: 200, statusText: "OK", data };
 }
