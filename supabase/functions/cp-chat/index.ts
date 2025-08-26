@@ -1,7 +1,10 @@
 /**
  * CP Edge Function: cp-chat
- * Patch: Replace SYS_PROMPT with hardened M3 System Prompt (with success=false examples).
- * Version: m3.17-m3-sysprompt
+ * Patch: session memory support + duplicate-question guard.
+ *   • Accepts client-provided memory (extracted fields) and sends it to the model.
+ *   • Merges memory + model output to compute status.missing.
+ *   • If model's next_question targets an already-known field, replace with first missing field.
+ * Version: m3.18-memory-guard
  */
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
@@ -9,7 +12,7 @@ const ENV_OPENAI = Deno.env.get("OPENAI_API_KEY");
 const DEV_UNSAFE_ALLOW_KEY = (Deno.env.get("DEV_UNSAFE_ALLOW_KEY") ?? "false").toLowerCase() === "true";
 const CP_MODEL_DEFAULT = Deno.env.get("CP_MODEL_DEFAULT") ?? "gpt-5";
 const CP_MODEL_MINI = Deno.env.get("CP_MODEL_MINI") ?? "gpt-4.1-mini";
-const CP_VERSION = "m3.17-m3-sysprompt";
+const CP_VERSION = "m3.18-memory-guard";
 
 const MODEL_CAPS: Record<string, { supports: { temperature: boolean; top_p: boolean } }> = {
   "gpt-5": { supports: { temperature: false, top_p: false } },
@@ -69,18 +72,72 @@ function toText(v: unknown): string {
   } catch { return String(v); }
 }
 
+type Extracted = {
+  tone: "eli5" | "intermediate" | "developer" | null;
+  idea: string | null;
+  name: string | null;
+  audience: string | null;
+  features: string[];
+  privacy: "Private" | "Share via link" | "Public" | null;
+  auth: "Google OAuth" | "Magic email link" | "None (dev only)" | null;
+  deep_work_hours: "0.5" | "1" | "2" | "4+" | null;
+};
+
 // –– Envelope helpers ––
 type Envelope = {
   success: boolean; mode: "chat"; session_id: string; turn_id: string;
   reply_to_user: string; confidence: "high" | "medium" | "low";
-  extracted: { tone: "eli5" | "intermediate" | "developer" | null; idea: string | null; name: string | null; audience: string | null; features: string[]; privacy: "Private" | "Share via link" | "Public" | null; auth: "Google OAuth" | "Magic email link" | "None (dev only)" | null; deep_work_hours: "0.5" | "1" | "2" | "4+" | null; };
+  extracted: Extracted;
   status: { complete: boolean; missing: string[]; next_question: string | null };
   suggestions: string[];
   error: { code: string | null; message: string | null };
   meta: { conversation_stage: "discovery" | "planning" | "generating" | "refining"; turn_count: number; schema_version: string };
   block: { language: "lovable-prompt" | "ts" | "js" | "json" | null; content: string | null; copy_safe: boolean } | null;
 };
-type ClientPayload = { session_id?: string; turn_count?: number; user_input: string; openai_api_key?: string };
+type ClientPayload = {
+  session_id?: string; turn_count?: number; user_input: string; openai_api_key?: string;
+  memory?: { extracted?: Partial<Extracted> } | null;
+};
+
+function safeExtracted(p?: Partial<Extracted> | null): Extracted {
+  return {
+    tone: p?.tone ?? "developer",
+    idea: p?.idea ?? null,
+    name: p?.name ?? null,
+    audience: p?.audience ?? null,
+    features: Array.isArray(p?.features) ? p!.features.filter(x=>typeof x==="string") : [],
+    privacy: (p?.privacy as Extracted["privacy"]) ?? null,
+    auth: (p?.auth as Extracted["auth"]) ?? null,
+    deep_work_hours: (p?.deep_work_hours as Extracted["deep_work_hours"]) ?? null
+  };
+}
+
+function computeMissing(ex: Extracted): string[] {
+  const req: (keyof Extracted)[] = ["tone","idea","name","audience","features","privacy","auth","deep_work_hours"];
+  const missing: string[] = [];
+  for (const k of req) {
+    const v = (ex as any)[k];
+    if (k==="features") { if (!Array.isArray(v) || v.length===0) missing.push("features"); continue; }
+    if (v===null || v===undefined || v==="") missing.push(k);
+  }
+  // tone is optional after first turn; if filled, don't treat as missing
+  if (ex.tone) { const i = missing.indexOf("tone"); if (i>=0) missing.splice(i,1); }
+  return missing;
+}
+
+function mergeExtracted(a?: Partial<Extracted> | null, b?: Partial<Extracted> | null): Extracted {
+  const A = safeExtracted(a); const B = safeExtracted(b);
+  return {
+    tone: B.tone ?? A.tone,
+    idea: B.idea ?? A.idea,
+    name: B.name ?? A.name,
+    audience: B.audience ?? A.audience,
+    features: [...new Set([...(A.features||[]), ...(B.features||[])])],
+    privacy: B.privacy ?? A.privacy,
+    auth: B.auth ?? A.auth,
+    deep_work_hours: B.deep_work_hours ?? A.deep_work_hours
+  };
+}
 
 function safeEnvelope(partial: Partial<Envelope>): Envelope {
   return {
@@ -90,11 +147,11 @@ function safeEnvelope(partial: Partial<Envelope>): Envelope {
     turn_id: partial.turn_id ?? uuid(),
     reply_to_user: toText(partial.reply_to_user ?? "OK."),
     confidence: partial.confidence ?? "high",
-    extracted: partial.extracted ?? { tone: "developer", idea: null, name: null, audience: null, features: [], privacy: null, auth: null, deep_work_hours: null },
+    extracted: safeExtracted(partial.extracted),
     status: partial.status ?? { complete: false, missing: [], next_question: null },
     suggestions: partial.suggestions ?? [],
     error: partial.error ?? { code: null, message: null },
-    meta: partial.meta ?? { conversation_stage: "planning", turn_count: 0, schema_version: "1.0" },
+    meta: { conversation_stage: "planning", turn_count: partial.meta?.turn_count ?? 0, schema_version: "1.0", model: partial.meta?.model, temperature: partial.meta?.temperature, usage: partial.meta?.usage },
     block: partial.block ?? null
   };
 }
@@ -452,6 +509,8 @@ Deno.serve(async (req) => {
   const turn_id = uuid();
   const turn_count = payload.turn_count ?? 0;
   const userText = (payload.user_input ?? "").toString().slice(0, 8000);
+  const clientMemory = payload.memory?.extracted ?? null;
+  const memoryExtracted = safeExtracted(clientMemory);
 
   // Short-circuit ping
   if (userText.trim().toLowerCase() === "ping") {
@@ -480,7 +539,15 @@ Deno.serve(async (req) => {
 
   const messages = [
     { role: "system", content: SYS_PROMPT },
-    { role: "user", content: JSON.stringify({ session_id, turn_id, user_input: userText }) }
+    { role: "user", content: JSON.stringify({
+      session_id,
+      turn_id,
+      user_input: userText,
+      memory: { 
+        extracted: memoryExtracted,
+        missing: computeMissing(memoryExtracted)
+      }
+    })}
   ];
 
   const body: Record<string, unknown> = { model: pick.model, messages, response_format: { type: "json_object" } };
@@ -511,8 +578,66 @@ Deno.serve(async (req) => {
     }
     if (contentAny === undefined) contentAny = msg ?? raw;
 
-    const envelope = normalizeFromModelContent(contentAny, session_id, turn_id, turn_count);
-    return withCors(req, JSON.stringify(envelope), { status: 200 });
+    // Normalize to envelope
+    let env = normalizeFromModelContent(contentAny, session_id, turn_id, turn_count);
+
+    // --- MEMORY MERGE + DUPLICATE-GUARD ---
+    // Merge extracted: memory first, then model's extracted (model may fill new fields)
+    const mergedExtracted = mergeExtracted(memoryExtracted, env.extracted);
+    const missingNow = computeMissing(mergedExtracted);
+    env.extracted = mergedExtracted;
+    env.status = env.status ?? { complete: false, missing: [], next_question: null };
+    env.status.missing = missingNow;
+    env.status.complete = missingNow.length === 0;
+
+    // If model asked for a field we already have, replace with next missing
+    const q = (env.status.next_question ?? "").toLowerCase();
+    const askedIdea = q.includes("idea");
+    const askedName = q.includes("name");
+    const askedAudience = q.includes("audience");
+    const askedFeatures = q.includes("feature");
+    const askedPrivacy = q.includes("privacy");
+    const askedAuth = q.includes("auth");
+    const askedHours = q.includes("hour");
+
+    const known: Record<string, boolean> = {
+      idea: !!mergedExtracted.idea,
+      name: !!mergedExtracted.name,
+      audience: !!mergedExtracted.audience,
+      features: (mergedExtracted.features?.length ?? 0) > 0,
+      privacy: !!mergedExtracted.privacy,
+      auth: !!mergedExtracted.auth,
+      deep_work_hours: !!mergedExtracted.deep_work_hours
+    };
+    const askedKnown =
+      (askedIdea && known.idea) || (askedName && known.name) || (askedAudience && known.audience) ||
+      (askedFeatures && known.features) || (askedPrivacy && known.privacy) ||
+      (askedAuth && known.auth) || (askedHours && known.deep_work_hours);
+
+    if (askedKnown || !env.status.next_question) {
+      const nextKey = missingNow[0]; // pick first missing per PRD
+      if (nextKey) {
+        const friendly: Record<string,string> = {
+          idea: "What's your app idea in one short line?",
+          name: "Do you have a name in mind? If not, I can suggest a few.",
+          audience: "Who's your target audience?",
+          features: "List 2–3 key features you want first.",
+          privacy: "Do you want the project to be Private, Share via link, or Public?",
+          auth: "How should users sign in? Google OAuth, Magic email link, or None (dev only)?",
+          deep_work_hours: "How many hours can you focus at a time? 0.5, 1, 2, or 4+?"
+        };
+        env.status.next_question = friendly[nextKey] ?? `Could you share ${nextKey.replaceAll("_"," ")}?`;
+        // Nudge reply if it was a duplicate ask
+        if (askedKnown) {
+          env.reply_to_user = `${env.reply_to_user}\n\n(We already have that. Next up:) ${env.status.next_question}`;
+        }
+      } else {
+        env.status.next_question = null;
+        env.status.complete = true;
+      }
+    }
+
+    return withCors(req, JSON.stringify(env), { status: 200 });
   } catch (err) {
     return withCors(req, JSON.stringify(safeEnvelope({
       success: false, session_id, turn_id,

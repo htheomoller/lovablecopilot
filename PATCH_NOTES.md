@@ -1,22 +1,17 @@
-# M3 — System Prompt Hardened with Error Examples
+# M3 — Session Memory (Client-provided) + Duplicate-Question Guard
 
-**Change**
-- Updated `SYS_PROMPT` to full M3 Prompt Engine instructions with all rules, examples, and added explicit `success=false` error cases (malformed input, unsupported request).
+**Why**: The model had no memory; we only sent the current turn. It kept re-asking for fields.
 
-**Why**
-- Prevents drift into generic Q&A.
-- Ensures strict JSON-only envelopes.
-- Teaches the model how to fail cleanly.
+## What changed
+- **Client**: builds a compact `memory.extracted` object by reducing previous assistant envelopes; sends it with every POST.
+- **Edge**: includes memory in the model's user message; merges memory + model.extracted; recomputes status.missing; if the model asks for an already-known field, we replace `next_question` with the first missing field and append a gentle nudge.
 
-**Version**
-- Edge Function now carries system prompt version `m3.17-m3-sysprompt`.
+## Result
+- "I already told you the idea" → CP acknowledges and moves on to the next missing field (e.g., audience or features).
+- Keeps one-question-per-turn, strict JSON envelope, Lovable-first behavior.
 
-**Deploy**
-```bash
-supabase functions deploy cp-chat --no-verify-jwt --project-ref <YOUR_PROJECT_REF>
-```
+## Version
+- X-CP-Version: m3.18-memory-guard
 
-**Test**
-1. Ask a normal onboarding question → JSON envelope with `next_question`.
-2. Send gibberish → envelope with `success=false`, `error.code=INVALID_INPUT`.
-3. Ask for something out of scope → envelope with `success=false`, `error.code=UNSUPPORTED`.
+## No DB required  
+- Memory is per-session and lives in the browser; explicit and transparent (as your PRD prefers).
