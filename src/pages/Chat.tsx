@@ -139,7 +139,7 @@ export default function ChatPage() {
     <div className="flex flex-col h-[calc(100vh-4rem)] max-w-4xl mx-auto px-4" style={{maxWidth: 880}}>
       <header className="py-4 border-b border-zinc-200">
         <h1 className="text-xl font-semibold text-zinc-800">CP — Chat</h1>
-        <p className="text-sm text-zinc-500 mt-1">React + Vite client using supabase.functions.invoke.</p>
+        <p className="text-sm text-zinc-500 mt-1">React + Vite client using supabase.functions.invoke (with explicit headers) and a fetch fallback.</p>
         {lastError ? <Banner kind="error">{lastError}</Banner> : null}
         <div className="mt-3 flex items-center gap-3">
           <button onClick={pingFunction} className="text-xs px-2 py-1 rounded border border-zinc-300 hover:bg-zinc-50">
