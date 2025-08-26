@@ -1,9 +1,8 @@
 /**
  * CP Edge Function: cp-chat
- * Dev fallback for missing Supabase secrets + /health/secrets endpoint.
- *   • If OPENAI_API_KEY missing and DEV_UNSAFE_ALLOW_KEY=true, allow passing openai_api_key in body (dev only).
- *   • Adds GET /health/secrets to check whether the function sees the key.
- * NOTE: Remove DEV_UNSAFE_ALLOW_KEY in prod. This is for unblocking development only.
+ * Patch: ALWAYS return a string in reply_to_user.
+ *   • Adds toText() and uses it in safeEnvelope() + normalizeFromModel().
+ *   • Prevents [object Object] bubbles even if the model outputs structured content.
  */
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
@@ -11,7 +10,7 @@ const ENV_OPENAI = Deno.env.get("OPENAI_API_KEY");
 const DEV_UNSAFE_ALLOW_KEY = (Deno.env.get("DEV_UNSAFE_ALLOW_KEY") ?? "false").toLowerCase() === "true";
 const CP_MODEL_DEFAULT = Deno.env.get("CP_MODEL_DEFAULT") ?? "gpt-5";
 const CP_MODEL_MINI = Deno.env.get("CP_MODEL_MINI") ?? "gpt-4.1-mini";
-const CP_VERSION = "m3.8-dev-fallback";
+const CP_VERSION = "m3.10-reply-string";
 
 const MODEL_CAPS: Record<string, { supports: { temperature: boolean; top_p: boolean } }> = {
   "gpt-5": { supports: { temperature: false, top_p: false } },
@@ -49,6 +48,7 @@ function withCors(req: Request, body: BodyInit | null, init: ResponseInit = {}) 
   return new Response(body, { ...init, headers });
 }
 
+// — utils —
 function uuid(): string {
   // deno-lint-ignore no-explicit-any
   const cryptoAny = crypto as any;
@@ -58,6 +58,20 @@ function uuid(): string {
     const v = c === "x" ? r : (r & 0x3) | 0x8;
     return v.toString(16);
   });
+}
+
+/** Coerce any value to a user-friendly string for chat bubbles. */
+function toText(v: unknown): string {
+  if (v == null) return "";
+  if (typeof v === "string") return v;
+  try {
+    const s = JSON.stringify(v);
+    if (!s) return String(v);
+    // Short objects one-line; large as pretty JSON
+    return s.length <= 200 ? s : JSON.stringify(v, null, 2);
+  } catch {
+    return String(v);
+  }
 }
 
 type Envelope = {
@@ -95,7 +109,7 @@ function safeEnvelope(partial: Partial<Envelope>): Envelope {
     mode: "chat",
     session_id: partial.session_id ?? uuid(),
     turn_id: partial.turn_id ?? uuid(),
-    reply_to_user: (partial.reply_to_user ?? "OK.").replace(/```/g, ""),
+    reply_to_user: toText(partial.reply_to_user ?? "OK.").replace(/```/g, ""),
     confidence: partial.confidence ?? "high",
     extracted: partial.extracted ?? { tone: "developer", idea: null, name: null, audience: null, features: [], privacy: null, auth: null, deep_work_hours: null },
     status: partial.status ?? { complete: false, missing: [], next_question: null },
@@ -109,84 +123,55 @@ function safeEnvelope(partial: Partial<Envelope>): Envelope {
 function normalizeFromModel(content: string, session_id: string, turn_id: string, turn_count: number): Envelope {
   const parsed = tryJSON(content);
   if (parsed && typeof parsed === "object" && ("reply_to_user" in parsed || "success" in parsed)) {
-    return safeEnvelope({
+    const env = safeEnvelope({
       ...parsed,
-      session_id: parsed.session_id ?? session_id,
-      turn_id: parsed.turn_id ?? turn_id,
-      meta: parsed.meta ?? { conversation_stage: "planning", turn_count }
+      session_id,
+      turn_id,
+      meta: (parsed.meta as any) ?? { conversation_stage: "planning", turn_count }
     });
+    // Ensure reply_to_user is a clean string even if original was object
+    return { ...env, reply_to_user: toText(env.reply_to_user).replace(/```/g, "") };
   }
   const reply = (parsed && (parsed.response || parsed.reply || parsed.message)) || content;
-  return safeEnvelope({
-    session_id, turn_id,
-    reply_to_user: String(reply),
-    meta: { conversation_stage: "planning", turn_count }
-  });
+  return safeEnvelope({ session_id, turn_id, reply_to_user: toText(reply), meta: { conversation_stage: "planning", turn_count } });
 }
 
+// —– handler —–
 Deno.serve(async (req) => {
   const url = new URL(req.url);
 
   if (req.method === "OPTIONS") return withCors(req, "ok", { status: 200, headers: { "Content-Type": "text/plain" } });
-  
   if (req.method === "GET" || req.method === "HEAD") {
-    // Health/secrets endpoint
-    if (url.pathname.endsWith("/health/secrets")) {
-      const body = req.method === "HEAD" ? null : JSON.stringify({ 
-        has_key: !!ENV_OPENAI, 
-        dev_fallback_enabled: DEV_UNSAFE_ALLOW_KEY,
-        version: CP_VERSION 
-      });
-      return withCors(req, body, { status: 200, headers: { "Content-Type": "application/json" } });
-    }
-    
-    // Regular health check
-    const body = req.method === "HEAD" ? null : JSON.stringify({ 
-      ok: true, 
-      fn: "cp-chat", 
-      path: url.pathname, 
-      time: new Date().toISOString(), 
-      version: CP_VERSION 
-    });
+    const body = req.method === "HEAD" ? null : JSON.stringify({ ok: true, fn: "cp-chat", path: url.pathname, time: new Date().toISOString(), version: CP_VERSION });
     return withCors(req, body, { status: 200, headers: { "Content-Type": "application/json" } });
   }
-  
   if (req.method !== "POST") return withCors(req, JSON.stringify({ error: { code: "METHOD_NOT_ALLOWED", message: "Use POST" } }), { status: 405 });
 
-  let payload: ClientPayload; 
-  try { payload = await req.json(); } catch { payload = { user_input: "" }; }
-
+  let payload: ClientPayload; try { payload = await req.json(); } catch { payload = { user_input: "" }; }
   const session_id = payload.session_id ?? uuid();
   const turn_id = uuid();
   const turn_count = payload.turn_count ?? 0;
   const userText = (payload.user_input ?? "").toString().slice(0, 8000);
 
-  // Short-circuit PING for deterministic verification
+  // Short-circuit ping
   if (userText.trim().toLowerCase() === "ping") {
-    const env = safeEnvelope({
-      success: true,
-      session_id, turn_id,
-      reply_to_user: "pong",
-      meta: { conversation_stage: "planning", turn_count }
-    });
-    return withCors(req, JSON.stringify(env), { status: 200 });
+    return withCors(req, JSON.stringify(safeEnvelope({ success: true, session_id, turn_id, reply_to_user: "pong", meta: { conversation_stage: "planning", turn_count } })), { status: 200 });
   }
 
-  // Determine OpenAI key (env or dev fallback)
-  let openaiKey = ENV_OPENAI;
-  if (!openaiKey && DEV_UNSAFE_ALLOW_KEY && payload.openai_api_key) {
-    openaiKey = payload.openai_api_key;
-  }
+  // Resolve key: prefer env; optionally allow dev fallback
+  const OPENAI_API_KEY =
+    ENV_OPENAI ??
+    (DEV_UNSAFE_ALLOW_KEY && payload.openai_api_key ? payload.openai_api_key : undefined);
 
-  if (!openaiKey) {
+  if (!OPENAI_API_KEY) {
     return withCors(req, JSON.stringify(safeEnvelope({
       success: false,
       session_id, turn_id,
-      reply_to_user: "OpenAI API key not available. Check secrets or provide key in dev mode.",
+      reply_to_user: "I can't see an OpenAI API key.",
       confidence: "low",
-      error: { code: "MISSING_OPENAI_KEY", message: "OPENAI_API_KEY not set and no dev fallback provided" },
+      error: { code: "MISSING_OPENAI_KEY", message: "OPENAI_API_KEY not set in Supabase and dev fallback disabled." },
       meta: { conversation_stage: "planning", turn_count }
-    })), { status: 500 });
+    })), { status: 200 });
   }
 
   const intent = detectIntent(userText);
@@ -198,52 +183,43 @@ Deno.serve(async (req) => {
     { role: "user", content: JSON.stringify({ session_id, turn_id, user_input: userText }) }
   ];
 
-  const body: Record<string, unknown> = {
-    model: pick.model,
-    messages,
-    response_format: { type: "json_object" }
-  };
+  const body: Record<string, unknown> = { model: pick.model, messages, response_format: { type: "json_object" } };
   if (caps.supports.temperature) body.temperature = pick.temperature;
 
   try {
     const resp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
-      headers: { "Authorization": `Bearer ${openaiKey}`, "Content-Type": "application/json" },
+      headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
       body: JSON.stringify(body)
     });
-
     const raw = await resp.text();
     if (!resp.ok) {
       return withCors(req, JSON.stringify(safeEnvelope({
-        success: false,
-        session_id, turn_id,
+        success: false, session_id, turn_id,
         reply_to_user: "I had trouble talking to the model.",
         confidence: "low",
         error: { code: "OPENAI_API_ERROR", message: raw },
         meta: { conversation_stage: "planning", turn_count }
       })), { status: 200 });
     }
-
-    const completion = tryJSON<any>(raw);
+    const completion = tryJSON(raw);
     const content = completion?.choices?.[0]?.message?.content;
     if (typeof content !== "string" || !content.length) {
       return withCors(req, JSON.stringify(safeEnvelope({
-        success: false,
-        session_id, turn_id,
+        success: false, session_id, turn_id,
         reply_to_user: "Model returned an empty message.",
         confidence: "low",
         error: { code: "EMPTY_CONTENT", message: raw },
         meta: { conversation_stage: "planning", turn_count }
       })), { status: 200 });
     }
-
     const envelope = normalizeFromModel(content, session_id, turn_id, turn_count);
+    // Final guard: coerce reply_to_user again just before returning
+    envelope.reply_to_user = toText(envelope.reply_to_user).replace(/```/g, "");
     return withCors(req, JSON.stringify(envelope), { status: 200 });
-
   } catch (err) {
     return withCors(req, JSON.stringify(safeEnvelope({
-      success: false,
-      session_id, turn_id,
+      success: false, session_id, turn_id,
       reply_to_user: "I had trouble reaching the model.",
       confidence: "low",
       error: { code: "EDGE_RUNTIME_ERROR", message: String(err?.message ?? err) },
