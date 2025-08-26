@@ -1,16 +1,22 @@
-# M3 — Final normalization for { response: ... } shapes
+# M3 — System Prompt Hardened with Error Examples
 
-**Why:** Your latest samples were JSON objects with a response field containing either a string or { text: "..." }. Our extractor didn't treat response as first-class, so the whole wrapper leaked through.
+**Change**
+- Updated `SYS_PROMPT` to full M3 Prompt Engine instructions with all rules, examples, and added explicit `success=false` error cases (malformed input, unsupported request).
 
-**What changed:**
-- extractHumanTextLike() now prioritizes response and uses extractFromResponseValue() to unwrap strings, {text|message|content|output_text|value}, or arrays (parts|outputs|items).
-- Keeps: envelope passthrough, JSON-string unwrap, arrays/objects flattening, fence stripping.
-- Version header: X-CP-Version: m3.15-response-key.
+**Why**
+- Prevents drift into generic Q&A.
+- Ensures strict JSON-only envelopes.
+- Teaches the model how to fail cleanly.
 
-**Test plan:**
-1. Hard refresh /chat.
-2. Ping → header shows m3.15-response-key.
-3. "How are you doing today?" → Should render a clean sentence, not a JSON object.
-4. "I would like some help coding a to do list" → Should render a clean clarifying question (no {session_id,...,"response":{...}}).
+**Version**
+- Edge Function now carries system prompt version `m3.17-m3-sysprompt`.
 
-If any new wrapper shape appears, paste a sample and we'll extend the extractor keys—though with response handled, this should close the loop.
+**Deploy**
+```bash
+supabase functions deploy cp-chat --no-verify-jwt --project-ref <YOUR_PROJECT_REF>
+```
+
+**Test**
+1. Ask a normal onboarding question → JSON envelope with `next_question`.
+2. Send gibberish → envelope with `success=false`, `error.code=INVALID_INPUT`.
+3. Ask for something out of scope → envelope with `success=false`, `error.code=UNSUPPORTED`.
