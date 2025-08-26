@@ -1,9 +1,10 @@
 /**
  * CP Edge Function: cp-chat
- * One-shot fix: unwrap JSON-looking strings into plain text.
- *   • If model returns a JSON string like {"message":"…"} we parse+extract the inner text.
- *   • Preserves universal extractor for arrays/objects and envelope passthrough.
- * Version: m3.14-unwrap-jsontext
+ * One-shot harden (final): handle response wrappers (string or object with {text|message|content})
+ *   • Many turns arrive as: {"session_id": "…", "turn_id": "…", "response": "…"}  OR  {"response": {"text":"…"}}
+ *   • This patch teaches the universal extractor to treat response as the primary payload.
+ *   • Keeps all previous guards (JSON-string unwrap, arrays/objects flattening, envelope passthrough).
+ * Version: m3.15-response-key
  */
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
@@ -11,7 +12,7 @@ const ENV_OPENAI = Deno.env.get("OPENAI_API_KEY");
 const DEV_UNSAFE_ALLOW_KEY = (Deno.env.get("DEV_UNSAFE_ALLOW_KEY") ?? "false").toLowerCase() === "true";
 const CP_MODEL_DEFAULT = Deno.env.get("CP_MODEL_DEFAULT") ?? "gpt-5";
 const CP_MODEL_MINI = Deno.env.get("CP_MODEL_MINI") ?? "gpt-4.1-mini";
-const CP_VERSION = "m3.14-unwrap-jsontext";
+const CP_VERSION = "m3.15-response-key";
 
 const MODEL_CAPS: Record<string, { supports: { temperature: boolean; top_p: boolean } }> = {
   "gpt-5": { supports: { temperature: false, top_p: false } },
@@ -71,99 +72,19 @@ function toText(v: unknown): string {
   } catch { return String(v); }
 }
 
+// –– Envelope helpers ––
 type Envelope = {
-  success: boolean;
-  mode: "chat";
-  session_id: string;
-  turn_id: string;
-  reply_to_user: string;
-  confidence: "high" | "medium" | "low";
-  extracted: {
-    tone: "eli5" | "intermediate" | "developer" | null;
-    idea: string | null;
-    name: string | null;
-    audience: string | null;
-    features: string[];
-    privacy: "Private" | "Share via link" | "Public" | null;
-    auth: "Google OAuth" | "Magic email link" | "None (dev only)" | null;
-    deep_work_hours: "0.5" | "1" | "2" | "4+" | null;
-  };
+  success: boolean; mode: "chat"; session_id: string; turn_id: string;
+  reply_to_user: string; confidence: "high" | "medium" | "low";
+  extracted: { tone: "eli5" | "intermediate" | "developer" | null; idea: string | null; name: string | null; audience: string | null; features: string[]; privacy: "Private" | "Share via link" | "Public" | null; auth: "Google OAuth" | "Magic email link" | "None (dev only)" | null; deep_work_hours: "0.5" | "1" | "2" | "4+" | null; };
   status: { complete: boolean; missing: string[]; next_question: string | null };
   suggestions: string[];
   error: { code: string | null; message: string | null };
   meta: { conversation_stage: "discovery" | "planning" | "generating" | "refining"; turn_count: number };
   block: { language: "lovable-prompt" | "ts" | "js" | "json" | null; content: string | null; copy_safe: boolean } | null;
 };
-
 type ClientPayload = { session_id?: string; turn_count?: number; user_input: string; openai_api_key?: string };
 
-// ––––– Universal extraction helpers –––––
-function normalizeIfEnvelope(obj: Record<string, unknown>): Envelope | null {
-  const looksLike = "reply_to_user" in obj || "success" in obj;
-  if (!looksLike) return null;
-  const env = safeEnvelope(obj as Partial<Envelope>);
-  env.reply_to_user = toText(env.reply_to_user);
-  return env;
-}
-
-/** Pull human-readable text from any shape (string/object/array). */
-function extractHumanTextLike(value: unknown): string {
-  // Strings: maybe JSON-wrapped
-  if (typeof value === "string") {
-    // If string looks like JSON, parse & recurse
-    const trimmed = value.trim();
-    if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
-      const maybe = tryJSON(trimmed);
-      if (maybe) return extractHumanTextLike(maybe);
-    }
-    return toText(value);
-  }
-
-  // Arrays: flatten elements
-  if (Array.isArray(value)) {
-    const parts = value.map(extractHumanTextLike).filter(Boolean);
-    const joined = parts.join("\n").trim();
-    if (joined) return joined;
-    return "";
-  }
-
-  // Objects: envelope → passthrough; else pick best field(s)
-  if (value && typeof value === "object") {
-    const obj = value as Record<string, unknown>;
-
-    // Envelope passthrough
-    const env = normalizeIfEnvelope(obj);
-    if (env) return env.reply_to_user;
-
-    // Priority direct keys
-    const priority = ["reply_to_user", "text", "message", "content", "output_text", "value"];
-    for (const k of priority) {
-      const v = obj[k];
-      if (typeof v === "string" && v) return toText(v);
-    }
-
-    // Common containers: flatten contents
-    const containers = ["parts", "outputs", "choices", "data", "messages", "items"];
-    for (const k of containers) {
-      const v = obj[k];
-      if (Array.isArray(v)) {
-        const joined = v.map(extractHumanTextLike).join("\n").trim();
-        if (joined) return joined;
-      }
-    }
-
-    // Single-string-field shortcut
-    const stringFields = Object.entries(obj).filter(([, v]) => typeof v === "string") as Array<[string, string]>;
-    if (stringFields.length === 1) return toText(stringFields[0][1]);
-
-    // Last resort: stringify
-    return toText(obj);
-  }
-
-  return toText(value);
-}
-
-/** Build a safe envelope (always string reply). */
 function safeEnvelope(partial: Partial<Envelope>): Envelope {
   return {
     success: partial.success ?? true,
@@ -181,12 +102,104 @@ function safeEnvelope(partial: Partial<Envelope>): Envelope {
   };
 }
 
+function normalizeIfEnvelope(obj: Record<string, unknown>): Envelope | null {
+  const looksLike = "reply_to_user" in obj || "success" in obj;
+  if (!looksLike) return null;
+  const env = safeEnvelope(obj as Partial<Envelope>);
+  env.reply_to_user = toText(env.reply_to_user);
+  return env;
+}
+
+/** NEW: pull a readable string out of a response value that can be string or object */
+function extractFromResponseValue(v: unknown): string | "" {
+  if (typeof v === "string") return toText(v);
+  if (v && typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    // common subkeys that carry the text
+    const sub = o.text ?? (o as any).message ?? (o as any).content ?? (o as any).output_text ?? (o as any).value;
+    if (typeof sub === "string") return toText(sub);
+    // arrays inside response: join
+    for (const key of ["parts", "outputs", "items"]) {
+      const arr = (o as any)[key];
+      if (Array.isArray(arr)) {
+        const joined = arr.map(extractHumanTextLike).join("\n").trim();
+        if (joined) return joined;
+      }
+    }
+    // final stringify
+    return toText(o);
+  }
+  return "";
+}
+
+/** Universal extractor: now prioritizes response and unwraps JSON-looking strings. */
+function extractHumanTextLike(value: unknown): string {
+  // Strings
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+      const maybe = tryJSON(trimmed);
+      if (maybe) return extractHumanTextLike(maybe);
+    }
+    return toText(value);
+  }
+
+  // Arrays
+  if (Array.isArray(value)) {
+    const parts = value.map(extractHumanTextLike).filter(Boolean);
+    const joined = parts.join("\n").trim();
+    if (joined) return joined;
+    return "";
+  }
+
+  // Objects
+  if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+
+    // Envelope passthrough
+    const env = normalizeIfEnvelope(obj);
+    if (env) return env.reply_to_user;
+
+    // 1) TOP PRIORITY: `response`
+    if ("response" in obj) {
+      const txt = extractFromResponseValue((obj as any).response);
+      if (txt) return txt;
+    }
+
+    // 2) Direct simple keys
+    const priority = ["reply_to_user", "text", "message", "content", "output_text", "value"];
+    for (const k of priority) {
+      const v = obj[k];
+      if (typeof v === "string" && v) return toText(v);
+    }
+
+    // 3) Containers
+    const containers = ["parts", "outputs", "choices", "data", "messages", "items"];
+    for (const k of containers) {
+      const v = (obj as any)[k];
+      if (Array.isArray(v)) {
+        const joined = v.map(extractHumanTextLike).join("\n").trim();
+        if (joined) return joined;
+      }
+    }
+
+    // 4) Single-string-field shortcut
+    const stringFields = Object.entries(obj).filter(([, v]) => typeof v === "string") as Array<[string, string]>;
+    if (stringFields.length === 1) return toText(stringFields[0][1]);
+
+    // 5) Last resort
+    return toText(obj);
+  }
+
+  return toText(value);
+}
+
+
 /** Normalize any model-produced content into our envelope. */
 function normalizeFromModelContent(contentAny: unknown, session_id: string, turn_id: string, turn_count: number): Envelope {
-  // First extraction
   let text = extractHumanTextLike(contentAny);
 
-  // EXTRA: If the result itself still looks like a JSON string with {message|text|reply_to_user}, unwrap again.
+  // If result still looks like JSON, unwrap once more
   const trimmed = text.trim();
   if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
     const parsed = tryJSON(trimmed);
