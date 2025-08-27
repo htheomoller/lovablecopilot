@@ -92,30 +92,29 @@ skip_map?: SkipMap;
 SYSTEM PROMPT
 ────────────────────────────────────────────────────────────────────────────── */
 
-const EXTRACTION_SYSTEM_PROMPT = `
-You are a field extractor for a project onboarding system. Your job is ONLY to extract structured data from user input.
+const EXTRACTION_SYSTEM_PROMPT = `You are a field extractor. Extract data from user input and return ONLY valid JSON.
 
-CRITICAL: Do NOT generate conversational replies. The server handles all conversation flow.
-
-Extract these fields from user input:
+Fields to extract:
+- idea: string | null (any app description/concept)
+- audience: string | null (who will use it)  
+- features: string[] (functionality mentioned)
+- name: string | null (app name, or "SKIP" if user declines)
 - tone: "eli5" | "intermediate" | "developer" | null
-- idea: string | null (app concept)
-- name: string | null (app name, null if user wants to skip)
-- audience: string | null (target users)
-- features: string[] (list of features mentioned)
 - privacy: "Private" | "Share via link" | "Public" | null
 - auth: "Google OAuth" | "Magic email link" | "None (dev only)" | null
 - deep_work_hours: "0.5" | "1" | "2" | "4+" | null
 
-Rules:
-- Extract only what the user explicitly mentions
-- If user says "skip", "no name needed", etc. for name, set name to "SKIP"
-- Multiple features can be extracted from one message
-- Return ONLY the JSON extraction, no conversation
+CRITICAL: Always return valid JSON with all 8 fields. Extract what's mentioned, null for missing fields.
 
-Example: User says "It's a todo app for families with sharing and reminders"
-Output: {"idea": "todo app for families", "audience": "families", "features": ["sharing", "reminders"]}
-`.trim();
+Examples:
+Input: "It's a todo list for my family"
+Output: {"idea": "todo list for my family", "audience": "my family", "features": [], "name": null, "tone": null, "privacy": null, "auth": null, "deep_work_hours": null}
+
+Input: "I just told you!"
+Output: {"idea": null, "audience": null, "features": [], "name": null, "tone": null, "privacy": null, "auth": null, "deep_work_hours": null}
+
+Input: "skip the name"
+Output: {"idea": null, "audience": null, "features": [], "name": "SKIP", "tone": null, "privacy": null, "auth": null, "deep_work_hours": null}`.trim();
 
 /* ──────────────────────────────────────────────────────────────────────────────
 HELPERS
