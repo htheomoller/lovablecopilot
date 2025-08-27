@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { callCpChat, getCpChatUrl, pingCpChat } from "../lib/cpClient";
+import { Send } from "lucide-react";
 
 type Envelope = {
   success: boolean; mode: "chat"; session_id: string; turn_id: string;
@@ -50,20 +51,22 @@ function CopyPromptButton({ content }: { content: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <button 
-      className="px-3 py-2 rounded-xl bg-zinc-900 text-white text-sm hover:bg-black transition" 
+      className="px-3 py-1.5 rounded-lg bg-foreground text-background text-xs font-medium hover:bg-foreground/90 transition-colors" 
       onClick={async ()=>{ 
         await navigator.clipboard.writeText(content); 
         setCopied(true); 
         setTimeout(()=>setCopied(false), 1200); 
       }}
     >
-      {copied ? "Copied!" : "Copy Prompt"}
+      {copied ? "Copied!" : "Copy"}
     </button>
   );
 }
 
 function Banner({ kind, children }: { kind: "warn" | "error" | "info"; children: any }) {
-  const styles = kind==="error" ? "bg-red-50 border-red-200 text-red-700" : kind==="warn" ? "bg-amber-50 border-amber-200 text-amber-700" : "bg-blue-50 border-blue-200 text-blue-700";
+  const styles = kind==="error" ? "bg-destructive/10 border-destructive/20 text-destructive" : 
+                 kind==="warn" ? "bg-yellow-50 border-yellow-200 text-yellow-700" : 
+                 "bg-primary/10 border-primary/20 text-primary";
   return <div className={`mt-2 text-xs border rounded-lg px-3 py-2 ${styles}`}>{children}</div>;
 }
 
@@ -80,7 +83,7 @@ function formatReply(raw: unknown): string {
 
 export default function ChatPage() {
   const [messages, setMessages] = useState<ChatItem[]>([
-    { role:"assistant", content:"Hi! I'm CP. Ask me anything about your Lovable project. If a prompt or code is generated, I'll include a Copy button." }
+    { role:"assistant", content:"Hi! I'm CP, your Lovable project assistant. I can help you plan, generate code, and guide you through building your app. What would you like to work on today?" }
   ]);
   const [input, setInput] = useState(""); 
   const [busy, setBusy] = useState(false); 
@@ -94,6 +97,15 @@ export default function ChatPage() {
   })) as unknown as React.MutableRefObject<string>;
   
   const turnCount = useMemo(()=> messages.filter(m=>m.role==="user").length, [messages]);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
 
   async function sendMessage() {
     const text=input.trim(); 
@@ -153,97 +165,158 @@ export default function ChatPage() {
     }
   }
 
-  useEffect(()=>{ 
-    window.scrollTo({ top: document.body.scrollHeight, behavior:"smooth" }); 
-  }, [messages.length]);
-
   return (
-    <div className="flex flex-col h-[calc(100vh-4rem)] max-w-4xl mx-auto px-4" style={{maxWidth: 880}}>
-      <header className="py-4 border-b border-zinc-200">
-        <h1 className="text-xl font-semibold text-zinc-800">CP — Chat</h1>
-        <p className="text-sm text-zinc-500 mt-1">Lovable-first. Memory-enabled. One question per turn.</p>
-        {lastError ? <Banner kind="error">{lastError}</Banner> : null}
-        <div className="mt-3 flex items-center gap-3">
-          <button onClick={pingFunction} className="text-xs px-2 py-1 rounded border border-zinc-300 hover:bg-zinc-50">
-            Ping cp-chat
-          </button>
-          <span className="text-xs text-zinc-400">Endpoint: {getCpChatUrl()}</span>
-        </div>
-        {diag ? (
-          <div className="mt-2 p-2 rounded bg-zinc-50 text-xs font-mono text-zinc-600">
-            <div>URL: {diag.url}</div>
-            {diag.status ? <div>Status: {diag.status}</div> : null}
-            {typeof diag.sample==="string" ? (
-              <pre className="mt-1 whitespace-pre-wrap">{diag.sample}</pre>
-            ) : diag.sample ? (
-              <pre className="mt-1 whitespace-pre-wrap">{JSON.stringify(diag.sample, null, 2)}</pre>
-            ) : null}
+    <div className="flex flex-col h-screen bg-background">
+      {/* Header - Minimal like ChatGPT */}
+      <header className="flex-shrink-0 border-b border-border bg-background/80 backdrop-blur-sm">
+        <div className="max-w-4xl mx-auto px-4 py-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-lg font-semibold text-foreground">CoPilot Chat</h1>
+              <p className="text-sm text-muted-foreground">Your Lovable project assistant</p>
+            </div>
+            <button 
+              onClick={pingFunction} 
+              className="text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted/50 text-muted-foreground transition-colors"
+            >
+              Test Connection
+            </button>
           </div>
-        ) : null}
+          {lastError && <Banner kind="error">{lastError}</Banner>}
+          {diag && (
+            <div className="mt-2 p-3 rounded-lg bg-muted/30 text-xs font-mono text-muted-foreground">
+              <div>Status: {diag.status}</div>
+              {typeof diag.sample === "string" ? (
+                <pre className="mt-1 whitespace-pre-wrap">{diag.sample}</pre>
+              ) : diag.sample ? (
+                <pre className="mt-1 whitespace-pre-wrap">{JSON.stringify(diag.sample, null, 2)}</pre>
+              ) : null}
+            </div>
+          )}
+        </div>
       </header>
 
-      <main className="flex-1 overflow-y-auto space-y-4 pb-4">
-        {messages.map((m,i)=>{
-          const env = (m as any).envelope as Envelope | undefined;
-          const usage = env?.meta?.usage; 
-          const model = env?.meta?.model; 
-          const temp = env?.meta?.temperature; 
-          const cost = usage?.cost;
-          return (
-            <div key={i} className={`flex ${m.role==="user" ? "justify-end" : "justify-start"}`}>
-              <div className={`rounded-2xl px-4 py-3 shadow ${m.role==="user" ? "bg-zinc-900 text-white" : "bg-white border border-zinc-200"}`} style={{ maxWidth:"85%" }}>
-                <div className="whitespace-pre-wrap text-sm leading-relaxed">{m.content}</div>
-
-                {m.role==="assistant" && env?.block?.content ? (
-                  <div className="mt-3 flex items-center gap-2">
-                    <CopyPromptButton content={env.block.content as string} />
-                    <span className="text-xs text-zinc-400">
-                      {env.block.language==="lovable-prompt" ? "Lovable prompt ready" : "Code block ready"}
-                    </span>
+      {/* Chat Messages */}
+      <main className="flex-1 overflow-y-auto">
+        <div className="max-w-4xl mx-auto px-4 py-6">
+          <div className="space-y-6">
+            {messages.map((message, index) => {
+              const env = (message as any).envelope as Envelope | undefined;
+              const usage = env?.meta?.usage;
+              const model = env?.meta?.model;
+              const temp = env?.meta?.temperature;
+              const cost = usage?.cost;
+              
+              return (
+                <div 
+                  key={index} 
+                  className={`flex items-start gap-4 animate-fade-in ${
+                    message.role === "user" ? "flex-row-reverse" : ""
+                  }`}
+                  style={{ animationDelay: `${index * 50}ms` }}
+                >
+                  {/* Avatar */}
+                  <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-xs font-medium ${
+                    message.role === "user" 
+                      ? "bg-primary text-primary-foreground" 
+                      : "bg-muted text-muted-foreground"
+                  }`}>
+                    {message.role === "user" ? "U" : "CP"}
                   </div>
-                ) : null}
+                  
+                  {/* Message Content */}
+                  <div className={`flex-1 max-w-[70%] ${message.role === "user" ? "text-right" : ""}`}>
+                    <div className={`inline-block p-4 rounded-2xl ${
+                      message.role === "user"
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-muted/50 text-foreground border border-border"
+                    }`}>
+                      <div className="text-[15px] leading-[1.6] whitespace-pre-wrap">
+                        {message.content}
+                      </div>
 
-                {m.role==="assistant" && env?.status?.next_question ? (
-                  <div className="mt-2 text-xs text-zinc-500">
-                    <span className="font-medium">Next:</span> {env.status.next_question}
+                      {/* Assistant-specific content */}
+                      {message.role === "assistant" && (
+                        <>
+                          {env?.block?.content && (
+                            <div className="mt-3 flex items-center gap-2">
+                              <CopyPromptButton content={env.block.content} />
+                              <span className="text-xs text-muted-foreground">
+                                {env.block.language === "lovable-prompt" ? "Prompt ready" : "Code ready"}
+                              </span>
+                            </div>
+                          )}
+
+                          {env?.status?.next_question && (
+                            <div className="mt-3 p-2 rounded-lg bg-primary/10 border border-primary/20">
+                              <div className="text-xs font-medium text-primary mb-1">Next Question:</div>
+                              <div className="text-xs text-primary/80">{env.status.next_question}</div>
+                            </div>
+                          )}
+
+                          {env?.confidence === "low" && (
+                            <div className="mt-2 text-xs text-yellow-600 bg-yellow-50 px-2 py-1 rounded">
+                              Low confidence - consider rephrasing
+                            </div>
+                          )}
+
+                          {(usage || model) && (
+                            <div className="mt-3 text-[10px] text-muted-foreground/70 border-t border-border/30 pt-2">
+                              {model && `${model}${typeof temp === "number" ? `@${temp}` : ""}`}
+                              {usage && ` • ${usage.prompt_tokens}/${usage.completion_tokens}/${usage.total_tokens} tokens`}
+                              {cost && ` • $${cost.total_usd.toFixed(4)}`}
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
                   </div>
-                ) : null}
-
-                {m.role==="assistant" && env?.confidence==="low" ? (
-                  <div className="mt-2 text-xs text-amber-600">Confidence is low — consider rephrasing.</div>
-                ) : null}
-
-                {m.role==="assistant" && (usage || model) ? (
-                  <div className="mt-2 text-[11px] text-zinc-400">
-                    {model ? `${model}${typeof temp==="number" ? `@${temp}` : ""}` : null}
-                    {usage ? ` · tok in/out/total ${usage.prompt_tokens}/${usage.completion_tokens}/${usage.total_tokens}` : null}
-                    {cost ? ` · $${cost.total_usd.toFixed(4)}` : null}
-                  </div>
-                ) : null}
-              </div>
-            </div>
-          );
-        })}
+                </div>
+              );
+            })}
+            <div ref={messagesEndRef} />
+          </div>
+        </div>
       </main>
 
-      <footer className="border-t border-zinc-200 py-3">
-        <div className="flex items-end gap-2">
-          <textarea 
-            value={input} 
-            onChange={e=>setInput(e.target.value)} 
-            onKeyDown={onKeyDown} 
-            placeholder={busy?"Thinking…":"Type your message…"} 
-            className="w-full min-h-[56px] max-h-40 p-3 rounded-xl border border-zinc-300 focus:outline-none focus:ring-2 focus:ring-zinc-400 text-sm" 
-          />
-          <button 
-            onClick={sendMessage} 
-            disabled={busy || !input.trim()} 
-            className="px-4 h-[44px] rounded-xl bg-black text-white text-sm disabled:opacity-50"
-          >
-            {busy?"…":"Send"}
-          </button>
+      {/* Input Area - ChatGPT style */}
+      <footer className="flex-shrink-0 border-t border-border bg-background">
+        <div className="max-w-4xl mx-auto p-4">
+          <div className="relative">
+            <textarea
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={onKeyDown}
+              placeholder="Type a message..."
+              disabled={busy}
+              className="w-full resize-none rounded-2xl border border-border bg-background px-4 py-3 pr-12 text-[15px] leading-[1.6] placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/30 disabled:opacity-50 min-h-[52px] max-h-[200px]"
+              rows={1}
+              style={{
+                height: 'auto',
+                minHeight: '52px'
+              }}
+              onInput={(e) => {
+                const target = e.target as HTMLTextAreaElement;
+                target.style.height = 'auto';
+                target.style.height = Math.min(target.scrollHeight, 200) + 'px';
+              }}
+            />
+            <button
+              onClick={sendMessage}
+              disabled={busy || !input.trim()}
+              className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center transition-colors"
+            >
+              {busy ? (
+                <div className="w-4 h-4 border-2 border-primary-foreground/30 border-t-primary-foreground rounded-full animate-spin" />
+              ) : (
+                <Send size={16} />
+              )}
+            </button>
+          </div>
+          <div className="mt-2 text-xs text-muted-foreground text-center">
+            Press Enter to send • Shift+Enter for new line
+          </div>
         </div>
-        <div className="mt-2 text-[10px] text-zinc-400">Press Enter to send • Shift+Enter for a new line</div>
       </footer>
     </div>
   );
