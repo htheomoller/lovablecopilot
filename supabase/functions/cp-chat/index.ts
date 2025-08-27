@@ -1,12 +1,12 @@
 /**
 	•	CP Edge Function: cp-chat
-	•	Version: m3.24-server-reply
+	•	Version: m3.25-conversational
 	•	
 	•	Summary of changes:
-	•		•	Server-generated replies: LLM is now extraction-only, server generates all conversational text
-	•		•	Eliminates split-brain problem where server flow control conflicted with LLM replies
-	•		•	Natural acknowledgments and clarification handling built server-side
-	•		•	No UI duplication since questions are now part of reply_to_user
+	•		•	Natural conversation with memory: LLM handles warm conversation with proper memory of user responses
+	•		•	Prevents extraction loops: explicit examples showing how to handle "I just told you!" scenarios
+	•		•	Maintains structured data collection while feeling natural and supportive
+	•		•	JSON format with conversational reply_to_user from LLM, validated server-side
 */
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
@@ -21,7 +21,7 @@ const DEV_UNSAFE_ALLOW_KEY = (Deno.env.get("DEV_UNSAFE_ALLOW_KEY") ?? "false").t
 const CP_MODEL_DEFAULT = Deno.env.get("CP_MODEL_DEFAULT") ?? "gpt-5";          // deep / code
 const CP_MODEL_MINI = Deno.env.get("CP_MODEL_MINI") ?? "gpt-4.1-mini";         // chat / brainstorm
 const CP_PRICE_TABLE_RAW = Deno.env.get("CP_PRICE_TABLE") ?? "";
-const CP_VERSION = "m3.24-server-reply";
+const CP_VERSION = "m3.25-conversational";
 
 type PriceTable = Record<string, { in: number; out: number }>;
 function parsePriceTable(): PriceTable { try { const j = JSON.parse(CP_PRICE_TABLE_RAW); if (j && typeof j === "object") return j as PriceTable; } catch {} return {}; }
@@ -92,29 +92,70 @@ skip_map?: SkipMap;
 SYSTEM PROMPT
 ────────────────────────────────────────────────────────────────────────────── */
 
-const EXTRACTION_SYSTEM_PROMPT = `You are a field extractor. Extract data from user input and return ONLY valid JSON.
+const CONVERSATIONAL_SYSTEM_PROMPT = `You are CP, a friendly Lovable project assistant helping founders plan their apps. You have a warm, supportive tone and remember what users tell you.
 
-Fields to extract:
-- idea: string | null (any app description/concept)
-- audience: string | null (who will use it)  
-- features: string[] (functionality mentioned)
-- name: string | null (app name, or "SKIP" if user declines)
-- tone: "eli5" | "intermediate" | "developer" | null
-- privacy: "Private" | "Share via link" | "Public" | null
-- auth: "Google OAuth" | "Magic email link" | "None (dev only)" | null
-- deep_work_hours: "0.5" | "1" | "2" | "4+" | null
+Your job: Have natural conversation while extracting these fields in order:
+1. idea (app concept)
+2. audience (target users) 
+3. features (2-3 main features)
+4. privacy (Private/Share via link/Public)
+5. auth (Google OAuth/Magic email link/None)
+6. deep_work_hours (0.5/1/2/4+ hours focus time)
 
-CRITICAL: Always return valid JSON with all 8 fields. Extract what's mentioned, null for missing fields.
+CRITICAL RULES:
+- Always respond with valid JSON in this exact format
+- Be conversational and warm in reply_to_user
+- NEVER ask for a field that's already provided
+- Progress through fields in order, but feel natural
+- If user says "skip name" or similar, note it but don't keep asking
+- Handle clarification requests helpfully
 
-Examples:
-Input: "It's a todo list for my family"
-Output: {"idea": "todo list for my family", "audience": "my family", "features": [], "name": null, "tone": null, "privacy": null, "auth": null, "deep_work_hours": null}
+JSON Format:
+{
+  "reply_to_user": "Natural, warm conversational response",
+  "extracted": {
+    "idea": "extracted app concept or null",
+    "audience": "target users or null", 
+    "features": ["feature1", "feature2"],
+    "name": "app name or null",
+    "privacy": "Private/Share via link/Public or null",
+    "auth": "Google OAuth/Magic email link/None (dev only) or null",
+    "deep_work_hours": "0.5/1/2/4+ or null"
+  },
+  "status": {
+    "complete": false,
+    "missing": ["list", "of", "missing", "fields"]
+  }
+}
 
-Input: "I just told you!"
-Output: {"idea": null, "audience": null, "features": [], "name": null, "tone": null, "privacy": null, "auth": null, "deep_work_hours": null}
+Example conversations:
 
-Input: "skip the name"
-Output: {"idea": null, "audience": null, "features": [], "name": "SKIP", "tone": null, "privacy": null, "auth": null, "deep_work_hours": null}`.trim();
+User: "I need help with an idea I have"
+Response: {
+  "reply_to_user": "I'd love to help! What's your app idea?",
+  "extracted": {"idea": null, "audience": null, "features": [], "name": null, "privacy": null, "auth": null, "deep_work_hours": null},
+  "status": {"complete": false, "missing": ["idea", "audience", "features", "privacy", "auth", "deep_work_hours"]}
+}
+
+User: "It's a todo list for my family"
+Response: {
+  "reply_to_user": "That sounds really useful! A family todo list could help everyone stay organized. Who specifically would be using it - just you, or all family members?",
+  "extracted": {"idea": "todo list for my family", "audience": "family", "features": [], "name": null, "privacy": null, "auth": null, "deep_work_hours": null},
+  "status": {"complete": false, "missing": ["features", "privacy", "auth", "deep_work_hours"]}
+}
+
+User: "I just told you!"
+Response: {
+  "reply_to_user": "You're absolutely right - sorry about that! So we have your family todo list concept. What are 2-3 key features you'd want? Like shared lists, reminders, or something else?",
+  "extracted": {"idea": "todo list for my family", "audience": "family", "features": [], "name": null, "privacy": null, "auth": null, "deep_work_hours": null},
+  "status": {"complete": false, "missing": ["features", "privacy", "auth", "deep_work_hours"]}
+}
+
+IMPORTANT: 
+- Be empathetic and acknowledge when you remember something
+- Never repeat questions about fields you already have
+- Progress naturally through the missing fields
+- Keep tone warm and supportive throughout`.trim();
 
 /* ──────────────────────────────────────────────────────────────────────────────
 HELPERS
@@ -567,9 +608,9 @@ const intent = detectIntent(userText);
 const pick = pickModelAndTemp(intent);
 const caps = MODEL_CAPS[pick.model] ?? { supports: { temperature: false, top_p: false } };
 
-// Compose model request for extraction only
+// Compose model request for conversational extraction
 const messages = [
-{ role: "system", content: EXTRACTION_SYSTEM_PROMPT },
+{ role: "system", content: CONVERSATIONAL_SYSTEM_PROMPT },
 { role: "user", content: JSON.stringify({
 session_id, turn_id, user_input: userText,
 memory: { extracted: memoryExtracted, skip_map }
@@ -601,40 +642,37 @@ const completion = tryJSON<any>(raw);
 const msg = completion?.choices?.[0]?.message;
 const contentAny: unknown = msg?.content ?? msg;
 
-// Prefer model envelope; otherwise normalize from text
-let modelEnv: Envelope | null = null;
-if (typeof contentAny === "string") modelEnv = parseAsEnvelope(contentAny);
-else if (contentAny && typeof contentAny === "object") modelEnv = normalizeIfEnvelope(contentAny as Record<string, unknown>);
-let env = modelEnv
-  ? safeEnvelope(modelEnv)
-  : normalizeFromModelContent(contentAny, session_id, turn_id, turn_count, pick.model, body.temperature as number | undefined, completion?.usage);
-
-// Merge fields (last write wins)
-const modelExtracted = env?.extracted ?? DEFAULT_EXTRACTED;
-const mergedExtracted = mergeExtracted(memoryExtracted, modelExtracted);
-
-// Honor model hint.skip
-const hintSkip = (modelEnv as any)?.hint?.skip;
-if (Array.isArray(hintSkip)) {
-  for (const k of hintSkip) {
-    if ((SKIPPABLE_FIELDS as string[]).includes(k)) skip_map[k as keyof Extracted] = true;
-  }
+// Parse LLM's JSON response
+let llmResponse: any = null;
+if (typeof contentAny === "string") {
+  llmResponse = tryJSON(contentAny);
 }
 
-// Compute deterministic next question
+if (!llmResponse || typeof llmResponse !== "object") {
+  return withCors(req, JSON.stringify(safeEnvelope({
+    success: false, session_id, turn_id,
+    reply_to_user: "I had trouble understanding the model response.",
+    confidence: "low",
+    error: { code: "INVALID_MODEL_RESPONSE", message: "Model did not return valid JSON" },
+    meta: { conversation_stage: "planning", turn_count, schema_version: "1.0", model: pick.model, temperature: (body.temperature as number | undefined), skip_map }
+  })), { status: 200 });
+}
+
+// Extract fields from LLM response
+const replyToUser = String(llmResponse.reply_to_user || "Let's continue!");
+const modelExtracted = llmResponse.extracted || {};
+const mergedExtracted = mergeExtracted(memoryExtracted, modelExtracted);
+
+// Compute final status
 const missingNow = computeMissing(mergedExtracted, skip_map);
 const nextQ = computeNextQuestion(mergedExtracted, skip_map);
 
-// Generate server reply instead of using LLM output
-const finalReply = generateServerReply(userText, mergedExtracted, skip_map, prevMissing);
-
-// Final envelope
-env = safeEnvelope({
-  ...env,
+// Final envelope with LLM's natural reply
+const env = safeEnvelope({
   session_id,
   turn_id,
   success: true,
-  reply_to_user: finalReply,
+  reply_to_user: replyToUser,
   extracted: mergedExtracted,
   status: { complete: missingNow.length === 0, missing: missingNow, next_question: nextQ },
   meta: {

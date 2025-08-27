@@ -1,22 +1,22 @@
-# M3 — Server Reply Control (m3.24)
+# M3.25 — Natural Conversation with Memory (m3.25-conversational)
 
 **What changed**
-- LLM is now extraction-only: Changed system prompt to only extract structured data, no conversational replies
-- Server-generated replies: All reply_to_user content is now generated server-side using deterministic logic
-- Natural acknowledgments: Server adds randomized acknowledgments ("Got it!", "Perfect!", etc.) when user provides info
-- Robust clarification handling: Server provides explanations for all fields when user asks "explain", "what's the difference", etc.
-- No UI duplication: Removed "Next Question" display since questions are now part of reply_to_user
+- Natural conversation with proper memory: LLM handles warm, empathetic conversation while maintaining structured data extraction
+- Fixed extraction loops: System prompt includes explicit examples preventing "I just told you!" scenarios 
+- Conversational JSON format: Single LLM response contains both natural reply_to_user and structured extracted data
+- Memory-aware responses: System remembers previous answers and never asks for same field twice
+- Warm acknowledgments: Natural responses like "That sounds really useful!" and "You're absolutely right - sorry about that!"
 
 **Why**
-- Eliminates "split brain" problem where server flow control conflicted with LLM-generated conversational text
-- Ensures deterministic, consistent conversation flow that matches the server's state machine
-- Provides natural, contextual responses while maintaining full control over progression
+- Previous extraction-only approach felt robotic and couldn't handle conversational memory
+- Users got frustrated with system asking same question repeatedly when they'd already answered
+- Needed natural conversation flow while maintaining structured data collection for project planning
 
 **Expected behavior**
-- Natural conversations with proper acknowledgments and explanations
-- No more contradictory questions from LLM vs server logic
-- Single, clean conversation flow without UI duplication
-- Clarification requests are handled immediately with field-specific explanations
+- Warm, natural responses that remember what users said
+- Progress through required fields (idea → audience → features → privacy → auth → deep_work_hours) without loops
+- Proper handling of clarification requests and "I already told you" situations
+- Empathetic acknowledgment of user input before progressing to next field
 
 **Deploy**
 
@@ -25,7 +25,7 @@ supabase functions deploy cp-chat --no-verify-jwt --project-ref <YOUR_PROJECT_RE
 ```
 
 **Testing**
-1. "help with an app" → asks idea naturally
-2. "explain" after any question → provides field-specific explanation
-3. "todo app for families" → acknowledges and moves to next field
-4. Natural flow without contradictions or duplicated questions
+1. "It's a todo list for my family" → extracts idea and audience, asks for features naturally
+2. "I just told you!" → acknowledges mistake and moves forward appropriately  
+3. Natural conversation flow with memory and empathy throughout
+4. No extraction loops or robotic repetition
