@@ -1,10 +1,7 @@
 /**
  * CP Edge Function: cp-chat
- * Patch: session memory support + duplicate-question guard.
- *   • Accepts client-provided memory (extracted fields) and sends it to the model.
- *   • Merges memory + model output to compute status.missing.
- *   • If model's next_question targets an already-known field, replace with first missing field.
- * Version: m3.18-memory-guard
+ * Patch: Honor full JSON envelope from model, merge with memory, enforce duplicate-question guard, treat "no name" as valid.
+ * Version: m3.19-envelope-merge
  */
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
@@ -12,7 +9,12 @@ const ENV_OPENAI = Deno.env.get("OPENAI_API_KEY");
 const DEV_UNSAFE_ALLOW_KEY = (Deno.env.get("DEV_UNSAFE_ALLOW_KEY") ?? "false").toLowerCase() === "true";
 const CP_MODEL_DEFAULT = Deno.env.get("CP_MODEL_DEFAULT") ?? "gpt-5";
 const CP_MODEL_MINI = Deno.env.get("CP_MODEL_MINI") ?? "gpt-4.1-mini";
-const CP_VERSION = "m3.18-memory-guard";
+const CP_PRICE_TABLE_RAW = Deno.env.get("CP_PRICE_TABLE") ?? "";
+const CP_VERSION = "m3.19-envelope-merge";
+
+type PriceTable = Record<string, { in: number; out: number }>;
+function parsePriceTable(): PriceTable { try { const j = JSON.parse(CP_PRICE_TABLE_RAW); if (j && typeof j === "object") return j as PriceTable; } catch {} return {}; }
+const PRICE_TABLE = parsePriceTable();
 
 const MODEL_CAPS: Record<string, { supports: { temperature: boolean; top_p: boolean } }> = {
   "gpt-5": { supports: { temperature: false, top_p: false } },
@@ -91,7 +93,14 @@ type Envelope = {
   status: { complete: boolean; missing: string[]; next_question: string | null };
   suggestions: string[];
   error: { code: string | null; message: string | null };
-  meta: { conversation_stage: "discovery" | "planning" | "generating" | "refining"; turn_count: number; schema_version: string };
+  meta: { 
+    conversation_stage: "discovery" | "planning" | "generating" | "refining"; 
+    turn_count: number; schema_version?: "1.0"; model?: string; temperature?: number; 
+    usage?: { 
+      prompt_tokens:number; completion_tokens:number; total_tokens:number; 
+      cost?: { input_usd:number; output_usd:number; total_usd:number; currency:"USD" } 
+    } 
+  };
   block: { language: "lovable-prompt" | "ts" | "js" | "json" | null; content: string | null; copy_safe: boolean } | null;
 };
 type ClientPayload = {
@@ -249,8 +258,86 @@ function extractHumanTextLike(value: unknown): string {
 }
 
 
+function parseAsEnvelope(raw: string): Envelope | null {
+  const obj = tryJSON(raw);
+  if (!obj || typeof obj !== "object") return null;
+  if (!("success" in obj) || !("mode" in obj)) return null;
+  try {
+    return safeEnvelope(obj as Partial<Envelope>);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeFromModel(raw: string | unknown, session_id: string, turn_id: string, turn_count: number, model: string, temperature: number | undefined, usage?: any, memoryExtracted?: Extracted): Envelope {
+  let env: Envelope | null = null;
+  if (typeof raw === "string") {
+    env = parseAsEnvelope(raw);
+  } else if (raw && typeof raw === "object") {
+    env = normalizeIfEnvelope(raw as Record<string, unknown>);
+  }
+  if (!env) {
+    // fallback to text extraction
+    return normalizeFromModelContent(raw, session_id, turn_id, turn_count, model, temperature, usage);
+  }
+  // Merge extracted with memory
+  const merged = mergeExtracted(memoryExtracted, env.extracted);
+  const missingNow = computeMissing(merged);
+  env.extracted = merged;
+  env.status = env.status ?? { complete: false, missing: [], next_question: null };
+  env.status.missing = missingNow;
+  env.status.complete = missingNow.length === 0;
+
+  // Optional field: name
+  if (merged.name === "(skip)" || merged.name === "(no name)") {
+    env.status.missing = env.status.missing.filter(m => m !== "name");
+  }
+
+  // Duplicate guard
+  const q = (env.status.next_question ?? "").toLowerCase();
+  const known: Record<string, boolean> = {
+    idea: !!merged.idea,
+    name: !!merged.name,
+    audience: !!merged.audience,
+    features: (merged.features?.length ?? 0) > 0,
+    privacy: !!merged.privacy,
+    auth: !!merged.auth,
+    deep_work_hours: !!merged.deep_work_hours
+  };
+  const askedKnown =
+    (q.includes("idea") && known.idea) || (q.includes("name") && known.name) || (q.includes("audience") && known.audience) ||
+    (q.includes("feature") && known.features) || (q.includes("privacy") && known.privacy) ||
+    (q.includes("auth") && known.auth) || (q.includes("hour") && known.deep_work_hours);
+
+  if (askedKnown || !env.status.next_question) {
+    const nextKey = missingNow[0];
+    if (nextKey) {
+      const friendly: Record<string, string> = {
+        idea: "What's your app idea in one short line?",
+        name: "Do you have a name in mind? If not, I can suggest a few.",
+        audience: "Who's your target audience?",
+        features: "List 2–3 key features you want first.",
+        privacy: "Do you want the project to be Private, Share via link, or Public?",
+        auth: "How should users sign in? Google OAuth, Magic email link, or None (dev only)?",
+        deep_work_hours: "How many hours can you focus at a time? 0.5, 1, 2, or 4+?"
+      };
+      env.status.next_question = friendly[nextKey] ?? `Could you share ${nextKey.replaceAll("_", " ")}?`;
+      if (askedKnown) {
+        env.reply_to_user = `${env.reply_to_user}\n\n(We already have that. Next up:) ${env.status.next_question}`;
+      }
+    } else {
+      env.status.next_question = null;
+      env.status.complete = true;
+    }
+  }
+
+  if (usage) env.meta.usage = usage;
+  env.meta.model = model; env.meta.temperature = temperature;
+  return env;
+}
+
 /** Normalize any model-produced content into our envelope. */
-function normalizeFromModelContent(contentAny: unknown, session_id: string, turn_id: string, turn_count: number): Envelope {
+function normalizeFromModelContent(contentAny: unknown, session_id: string, turn_id: string, turn_count: number, model: string, temperature: number | undefined, usage?: any): Envelope {
   let text = extractHumanTextLike(contentAny);
 
   // If result still looks like JSON, unwrap once more
@@ -263,13 +350,20 @@ function normalizeFromModelContent(contentAny: unknown, session_id: string, turn
     }
   }
 
-  return safeEnvelope({
+  const env = safeEnvelope({
     success: true,
     mode: "chat",
     session_id, turn_id,
     reply_to_user: text,
-    meta: { conversation_stage: "planning", turn_count }
+    meta: { conversation_stage: "planning", turn_count, schema_version: "1.0", model, temperature }
   });
+  if (usage) {
+    const pt=Number(usage.prompt_tokens??0), ct=Number(usage.completion_tokens??0), tt=Number(usage.total_tokens??pt+ct);
+    const price=PRICE_TABLE[model]??{in:0,out:0};
+    const input_usd=(pt/1000)*price.in, output_usd=(ct/1000)*price.out, total_usd=input_usd+output_usd;
+    env.meta.usage={ prompt_tokens:pt, completion_tokens:ct, total_tokens:tt, cost:{ input_usd, output_usd, total_usd, currency:"USD" } };
+  }
+  return env;
 }
 
 const SYS_PROMPT = `
@@ -569,74 +663,10 @@ Deno.serve(async (req) => {
         meta: { conversation_stage: "planning", turn_count }
       })), { status: 200 });
     }
-    // Support classic and structured responses
     const completion = tryJSON<any>(raw);
     const msg = completion?.choices?.[0]?.message;
-    let contentAny: unknown = msg?.content;
-    if (contentAny === undefined && msg && typeof msg === "object") {
-      contentAny = (msg as any).text ?? (msg as any).content ?? (msg as any).message;
-    }
-    if (contentAny === undefined) contentAny = msg ?? raw;
-
-    // Normalize to envelope
-    let env = normalizeFromModelContent(contentAny, session_id, turn_id, turn_count);
-
-    // --- MEMORY MERGE + DUPLICATE-GUARD ---
-    // Merge extracted: memory first, then model's extracted (model may fill new fields)
-    const mergedExtracted = mergeExtracted(memoryExtracted, env.extracted);
-    const missingNow = computeMissing(mergedExtracted);
-    env.extracted = mergedExtracted;
-    env.status = env.status ?? { complete: false, missing: [], next_question: null };
-    env.status.missing = missingNow;
-    env.status.complete = missingNow.length === 0;
-
-    // If model asked for a field we already have, replace with next missing
-    const q = (env.status.next_question ?? "").toLowerCase();
-    const askedIdea = q.includes("idea");
-    const askedName = q.includes("name");
-    const askedAudience = q.includes("audience");
-    const askedFeatures = q.includes("feature");
-    const askedPrivacy = q.includes("privacy");
-    const askedAuth = q.includes("auth");
-    const askedHours = q.includes("hour");
-
-    const known: Record<string, boolean> = {
-      idea: !!mergedExtracted.idea,
-      name: !!mergedExtracted.name,
-      audience: !!mergedExtracted.audience,
-      features: (mergedExtracted.features?.length ?? 0) > 0,
-      privacy: !!mergedExtracted.privacy,
-      auth: !!mergedExtracted.auth,
-      deep_work_hours: !!mergedExtracted.deep_work_hours
-    };
-    const askedKnown =
-      (askedIdea && known.idea) || (askedName && known.name) || (askedAudience && known.audience) ||
-      (askedFeatures && known.features) || (askedPrivacy && known.privacy) ||
-      (askedAuth && known.auth) || (askedHours && known.deep_work_hours);
-
-    if (askedKnown || !env.status.next_question) {
-      const nextKey = missingNow[0]; // pick first missing per PRD
-      if (nextKey) {
-        const friendly: Record<string,string> = {
-          idea: "What's your app idea in one short line?",
-          name: "Do you have a name in mind? If not, I can suggest a few.",
-          audience: "Who's your target audience?",
-          features: "List 2–3 key features you want first.",
-          privacy: "Do you want the project to be Private, Share via link, or Public?",
-          auth: "How should users sign in? Google OAuth, Magic email link, or None (dev only)?",
-          deep_work_hours: "How many hours can you focus at a time? 0.5, 1, 2, or 4+?"
-        };
-        env.status.next_question = friendly[nextKey] ?? `Could you share ${nextKey.replaceAll("_"," ")}?`;
-        // Nudge reply if it was a duplicate ask
-        if (askedKnown) {
-          env.reply_to_user = `${env.reply_to_user}\n\n(We already have that. Next up:) ${env.status.next_question}`;
-        }
-      } else {
-        env.status.next_question = null;
-        env.status.complete = true;
-      }
-    }
-
+    const contentAny: unknown = msg?.content ?? msg;
+    const env = normalizeFromModel(contentAny as any, session_id, turn_id, turn_count, pick.model, body.temperature as number | undefined, completion?.usage, memoryExtracted);
     return withCors(req, JSON.stringify(env), { status: 200 });
   } catch (err) {
     return withCors(req, JSON.stringify(safeEnvelope({
@@ -644,7 +674,7 @@ Deno.serve(async (req) => {
       reply_to_user: "I had trouble reaching the model.",
       confidence: "low",
       error: { code: "EDGE_RUNTIME_ERROR", message: String(err?.message ?? err) },
-      meta: { conversation_stage: "planning", turn_count }
+      meta: { conversation_stage: "planning", turn_count, schema_version: "1.0", model: pick.model, temperature: undefined }
     })), { status: 200 });
   }
 });
