@@ -166,7 +166,7 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="flex flex-col h-screen bg-background">
+    <div className="flex flex-col h-screen" style={{ backgroundColor: 'hsl(var(--chat-background))' }}>
       {/* Header - Minimal like ChatGPT */}
       <header className="flex-shrink-0 border-b border-border bg-background/80 backdrop-blur-sm">
         <div className="max-w-4xl mx-auto px-4 py-3">
@@ -210,27 +210,25 @@ export default function ChatPage() {
               return (
                 <div 
                   key={index} 
-                  className={`flex items-start gap-4 animate-fade-in ${
-                    message.role === "user" ? "flex-row-reverse" : ""
+                  className={`flex animate-fade-in ${
+                    message.role === "user" ? "justify-end" : "justify-start"
                   }`}
                   style={{ animationDelay: `${index * 50}ms` }}
                 >
-                  {/* Avatar */}
-                  <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-xs font-medium ${
-                    message.role === "user" 
-                      ? "bg-primary text-primary-foreground" 
-                      : "bg-muted text-muted-foreground"
-                  }`}>
-                    {message.role === "user" ? "U" : "CP"}
-                  </div>
-                  
                   {/* Message Content */}
-                  <div className={`flex-1 max-w-[70%] ${message.role === "user" ? "text-right" : ""}`}>
-                    <div className={`inline-block p-4 rounded-2xl ${
-                      message.role === "user"
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-muted/50 text-foreground border border-border"
-                    }`}>
+                  <div className={`max-w-[70%]`}>
+                    <div 
+                      className={`inline-block p-4 rounded-2xl ${
+                        message.role === "user"
+                          ? "text-white"
+                          : "text-foreground"
+                      }`}
+                      style={{
+                        backgroundColor: message.role === "user" 
+                          ? 'hsl(var(--user-bubble))' 
+                          : 'hsl(var(--assistant-bubble))'
+                      }}
+                    >
                       <div className="text-[15px] leading-[1.6] whitespace-pre-wrap">
                         {message.content}
                       </div>
@@ -248,9 +246,9 @@ export default function ChatPage() {
                           )}
 
                           {env?.status?.next_question && (
-                            <div className="mt-3 p-2 rounded-lg bg-primary/10 border border-primary/20">
-                              <div className="text-xs font-medium text-primary mb-1">Next Question:</div>
-                              <div className="text-xs text-primary/80">{env.status.next_question}</div>
+                            <div className="mt-3 p-3 rounded-lg bg-white">
+                              <div className="text-xs font-medium text-muted-foreground mb-1">Next Question:</div>
+                              <div className="text-xs text-muted-foreground">{env.status.next_question}</div>
                             </div>
                           )}
 
