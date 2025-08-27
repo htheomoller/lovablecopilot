@@ -1,11 +1,12 @@
 /**
 	•	CP Edge Function: cp-chat
-	•	Version: m3.23-clarify-and-no-dup
+	•	Version: m3.24-server-reply
 	•	
-	•	Summary of changes from m3.21/22:
-	•		•	Clarification-aware replies: if the user asks to "explain" the last field, we provide a concise server-side explanation and advance deterministically.
-	•		•	reply_to_user no longer appends the next question (prevents duplication with UI).
-	•		•	Keeps deterministic orchestrator, skip_map, schema coercion, and model switching.
+	•	Summary of changes:
+	•		•	Server-generated replies: LLM is now extraction-only, server generates all conversational text
+	•		•	Eliminates split-brain problem where server flow control conflicted with LLM replies
+	•		•	Natural acknowledgments and clarification handling built server-side
+	•		•	No UI duplication since questions are now part of reply_to_user
 */
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
@@ -20,7 +21,7 @@ const DEV_UNSAFE_ALLOW_KEY = (Deno.env.get("DEV_UNSAFE_ALLOW_KEY") ?? "false").t
 const CP_MODEL_DEFAULT = Deno.env.get("CP_MODEL_DEFAULT") ?? "gpt-5";          // deep / code
 const CP_MODEL_MINI = Deno.env.get("CP_MODEL_MINI") ?? "gpt-4.1-mini";         // chat / brainstorm
 const CP_PRICE_TABLE_RAW = Deno.env.get("CP_PRICE_TABLE") ?? "";
-const CP_VERSION = "m3.23-clarify-and-no-dup";
+const CP_VERSION = "m3.24-server-reply";
 
 type PriceTable = Record<string, { in: number; out: number }>;
 function parsePriceTable(): PriceTable { try { const j = JSON.parse(CP_PRICE_TABLE_RAW); if (j && typeof j === "object") return j as PriceTable; } catch {} return {}; }
@@ -91,27 +92,29 @@ skip_map?: SkipMap;
 SYSTEM PROMPT
 ────────────────────────────────────────────────────────────────────────────── */
 
-const SYS_PROMPT = `
-You are CP's Prompt Engine, embedded in Lovable.dev. You are a thoughtful senior developer specialized in Lovable. JSON-only.
+const EXTRACTION_SYSTEM_PROMPT = `
+You are a field extractor for a project onboarding system. Your job is ONLY to extract structured data from user input.
 
-Goals
-	•	Guide founders with a natural conversation.
-	•	Extract structured details incrementally.
-	•	Always output a single JSON envelope (schema provided by the tool).
-	•	Support copy-safe Lovable prompts when requested.
+CRITICAL: Do NOT generate conversational replies. The server handles all conversation flow.
 
-Behavior Rules
-	•	Warm, natural, adaptive. Not a form.
-	•	One clear question per turn.
-	•	Before asking, check which fields are missing and never repeat.
-	•	Adapt tone (eli5, intermediate, developer).
-	•	Lovable-first (no external tooling).
-	•	If user updates a field, accept the change.
+Extract these fields from user input:
+- tone: "eli5" | "intermediate" | "developer" | null
+- idea: string | null (app concept)
+- name: string | null (app name, null if user wants to skip)
+- audience: string | null (target users)
+- features: string[] (list of features mentioned)
+- privacy: "Private" | "Share via link" | "Public" | null
+- auth: "Google OAuth" | "Magic email link" | "None (dev only)" | null
+- deep_work_hours: "0.5" | "1" | "2" | "4+" | null
 
-Extraction Instructions
-	•	From each user turn, extract as many fields as you can from: tone, idea, name, audience, features[], privacy, auth, deep_work_hours.
-	•	If the user wants to skip a field (e.g., "skip name"), you may include a hint: { "hint": { "skip": ["name"] } }.
-	•	Do not choose next_question yourself; the server will decide. Focus on accurate extraction and a helpful reply_to_user.
+Rules:
+- Extract only what the user explicitly mentions
+- If user says "skip", "no name needed", etc. for name, set name to "SKIP"
+- Multiple features can be extracted from one message
+- Return ONLY the JSON extraction, no conversation
+
+Example: User says "It's a todo app for families with sharing and reminders"
+Output: {"idea": "todo app for families", "audience": "families", "features": ["sharing", "reminders"]}
 `.trim();
 
 /* ──────────────────────────────────────────────────────────────────────────────
@@ -336,7 +339,7 @@ return missing;
 SKIP & NEXT QUESTION
 ────────────────────────────────────────────────────────────────────────────── */
 
-const FRIENDLY_QUESTION: Record<keyof Extracted, string> = {
+const QUESTIONS: Record<keyof Extracted, string> = {
 tone: "How would you like me to explain things — ELI5, intermediate, or developer?",
 idea: "What's your app idea in one short line?",
 name: "Do you have a name in mind? If not, we can skip naming.",
@@ -346,6 +349,18 @@ privacy: "Do you want the project to be Private, Share via link, or Public?",
 auth: "How should users sign in? Google OAuth, Magic email link, or None (dev only)?",
 deep_work_hours: "How many hours can you focus at a time? 0.5, 1, 2, or 4+?"
 };
+
+const EXPLANATIONS: Record<string, string> = {
+privacy: "Private means only you and your team can see it. Share via link means it's unlisted but anyone with the link can access it. Public means it's visible to everyone.",
+auth: "Google OAuth lets users sign in with their Google account. Magic email link sends a passwordless login link. None means no authentication (only for development).",
+tone: "ELI5 means I'll explain everything very simply. Intermediate gives some technical detail. Developer assumes you know coding.",
+features: "Features are the main things your app will do - like 'user login', 'send messages', or 'upload photos'.",
+audience: "Your target audience is who will use your app - like 'busy parents', 'small business owners', or 'college students'.",
+deep_work_hours: "This helps me estimate realistic timelines. How long can you focus on building without interruptions?",
+idea: "Your app idea should be a short description of what your app does - like 'a todo app for families' or 'a photo sharing app for events'."
+};
+
+const ACKNOWLEDGMENTS = ["Got it", "Perfect", "Makes sense", "Great", "Understood", "Nice"];
 
 const SKIPPABLE_FIELDS: Array<keyof Extracted> = ["name", "audience", "features", "privacy", "auth", "deep_work_hours", "tone", "idea"];
 
@@ -375,7 +390,44 @@ function computeNextQuestion(ex: Extracted, skip_map: SkipMap): string | null {
 const missing = computeMissing(ex, skip_map);
 const nextKey = missing[0] as keyof Extracted | undefined;
 if (!nextKey) return null;
-return FRIENDLY_QUESTION[nextKey] ?? `Could you share ${String(nextKey).replaceAll("_", " ")}?`;
+return QUESTIONS[nextKey] ?? `Could you share ${String(nextKey).replaceAll("_", " ")}?`;
+}
+
+function detectClarificationRequest(userInput: string): boolean {
+const lower = userInput.toLowerCase();
+const phrases = ["explain", "difference", "what does that mean", "i don't know", "not sure", "what is", "confused", "don't understand"];
+return phrases.some(phrase => lower.includes(phrase));
+}
+
+function generateServerReply(userInput: string, extracted: Extracted, skipMap: SkipMap, prevMissing: string[]): string {
+const missing = computeMissing(extracted, skipMap);
+const lastFieldAsked = prevMissing[0];
+  
+// Handle clarification requests
+if (detectClarificationRequest(userInput) && lastFieldAsked && EXPLANATIONS[lastFieldAsked]) {
+const explanation = EXPLANATIONS[lastFieldAsked];
+const question = QUESTIONS[lastFieldAsked as keyof Extracted];
+return `${explanation}\n\n${question}`;
+}
+  
+// If complete
+if (missing.length === 0) {
+return "Perfect! We have everything we need. I'll now create your project roadmap and PRD.";
+}
+  
+// Get next question
+const nextField = missing[0] as keyof Extracted;
+const nextQuestion = QUESTIONS[nextField];
+  
+// Add acknowledgment if user provided info
+const hasNewInfo = userInput.trim().length > 10 && !userInput.toLowerCase().includes("help") && !userInput.toLowerCase().includes("ping");
+  
+if (hasNewInfo && prevMissing.length > missing.length) {
+const ack = ACKNOWLEDGMENTS[Math.floor(Math.random() * ACKNOWLEDGMENTS.length)];
+return `${ack}! ${nextQuestion}`;
+}
+  
+return nextQuestion;
 }
 
 /* ──────────────────────────────────────────────────────────────────────────────
@@ -483,11 +535,10 @@ const turn_id = uuid();
 const turn_count = payload.turn_count ?? 0;
 const userText = (payload.user_input ?? "").toString().slice(0, 8000);
 
-// Memory at the start of the turn (used to infer the "previous question")
+// Memory at the start of the turn (used for server reply generation)
 const memoryExtracted = coerceExtracted(payload.memory?.extracted);
 const skip_map_initial: SkipMap = { ...(payload.memory?.skip_map ?? {}) };
 const prevMissing = computeMissing(memoryExtracted, skip_map_initial);
-const prevNextKey = prevMissing[0] as MissingKey | undefined;
 
 // Update skip_map with any new skip intent in this user message
 let skip_map: SkipMap = detectSkipsFromText(userText, skip_map_initial);
@@ -517,9 +568,9 @@ const intent = detectIntent(userText);
 const pick = pickModelAndTemp(intent);
 const caps = MODEL_CAPS[pick.model] ?? { supports: { temperature: false, top_p: false } };
 
-// Compose model request
+// Compose model request for extraction only
 const messages = [
-{ role: "system", content: SYS_PROMPT },
+{ role: "system", content: EXTRACTION_SYSTEM_PROMPT },
 { role: "user", content: JSON.stringify({
 session_id, turn_id, user_input: userText,
 memory: { extracted: memoryExtracted, skip_map }
@@ -575,16 +626,8 @@ if (Array.isArray(hintSkip)) {
 const missingNow = computeMissing(mergedExtracted, skip_map);
 const nextQ = computeNextQuestion(mergedExtracted, skip_map);
 
-// Build reply: clarification-aware and without appending nextQ text
-let finalReply: string;
-if (isClarify(userText) && prevNextKey) {
-  // Provide explanation for the previously asked field, even if now filled
-  const exp = EXPLAIN[prevNextKey] ?? "Happy to explain. I'll keep answers short and specific.";
-  finalReply = exp;
-} else {
-  // Natural model text, sanitized (no duplicate/irrelevant questions)
-  finalReply = enforceReplyText(env.reply_to_user, mergedExtracted, skip_map);
-}
+// Generate server reply instead of using LLM output
+const finalReply = generateServerReply(userText, mergedExtracted, skip_map, prevMissing);
 
 // Final envelope
 env = safeEnvelope({
@@ -596,7 +639,7 @@ env = safeEnvelope({
   extracted: mergedExtracted,
   status: { complete: missingNow.length === 0, missing: missingNow, next_question: nextQ },
   meta: {
-    conversation_stage: "planning",
+    conversation_stage: missingNow.length === 0 ? "complete" : "planning",
     turn_count,
     schema_version: "1.0",
     model: pick.model,
@@ -621,7 +664,7 @@ success: false, session_id, turn_id,
 reply_to_user: "I had trouble reaching the model.",
 confidence: "low",
 error: { code: "EDGE_RUNTIME_ERROR", message: String((err as any)?.message ?? err) },
-meta: { conversation_stage: "planning", turn_count, schema_version: "1.0", model: pick.model, temperature: (body.temperature as number | undefined), skip_map: skip_map_initial }
+meta: { conversation_stage: "planning", turn_count, schema_version: "1.0", model: pick.model, temperature: (body.temperature as number | undefined), skip_map }
 })), { status: 200 });
 }
 });

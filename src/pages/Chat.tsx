@@ -245,12 +245,6 @@ export default function ChatPage() {
                             </div>
                           )}
 
-                          {env?.status?.next_question && (
-                            <div className="mt-3 p-3 rounded-lg bg-white">
-                              <div className="text-xs font-medium text-muted-foreground mb-1">Next Question:</div>
-                              <div className="text-xs text-muted-foreground">{env.status.next_question}</div>
-                            </div>
-                          )}
 
                           {env?.confidence === "low" && (
                             <div className="mt-2 text-xs text-yellow-600 bg-yellow-50 px-2 py-1 rounded">
