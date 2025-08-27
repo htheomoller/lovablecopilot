@@ -1,7 +1,7 @@
 /**
  * CP Edge Function: cp-chat
- * Patch: Honor full JSON envelope from model, merge with memory, enforce duplicate-question guard, treat "no name" as valid.
- * Version: m3.19-envelope-merge
+ * Patch: Make name optional, treat "no name" as a stable skip, and block name-asks unless user opts into naming.
+ * Version: m3.20-required-fields-and-name-policy
  */
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
@@ -10,7 +10,7 @@ const DEV_UNSAFE_ALLOW_KEY = (Deno.env.get("DEV_UNSAFE_ALLOW_KEY") ?? "false").t
 const CP_MODEL_DEFAULT = Deno.env.get("CP_MODEL_DEFAULT") ?? "gpt-5";
 const CP_MODEL_MINI = Deno.env.get("CP_MODEL_MINI") ?? "gpt-4.1-mini";
 const CP_PRICE_TABLE_RAW = Deno.env.get("CP_PRICE_TABLE") ?? "";
-const CP_VERSION = "m3.19-envelope-merge";
+const CP_VERSION = "m3.20-required-fields-and-name-policy";
 
 type PriceTable = Record<string, { in: number; out: number }>;
 function parsePriceTable(): PriceTable { try { const j = JSON.parse(CP_PRICE_TABLE_RAW); if (j && typeof j === "object") return j as PriceTable; } catch {} return {}; }
@@ -121,16 +121,42 @@ function safeExtracted(p?: Partial<Extracted> | null): Extracted {
   };
 }
 
+// — additions —
+function saidNoName(userText: string): boolean {
+  const t = userText.toLowerCase();
+  return [
+    "no name", "doesn't need a name", "doesn't need a name",
+    "dont need a name", "don't need a name",
+    "skip the name", "skip name", "no need for a name"
+  ].some(ph => t.includes(ph));
+}
+
+function wantsNaming(userText: string): boolean {
+  const t = userText.toLowerCase();
+  return ["suggest a name", "name ideas", "what should we call", "call it", "rename", "pick a name"].some(ph => t.includes(ph));
+}
+
+/** REQUIRED: order of discovery. NOTE: name intentionally omitted (optional). */
+const REQUIRED_DISCOVERY_FIELDS: Array<keyof Extracted> = [
+  "tone", "idea", "audience", "features", "privacy", "auth", "deep_work_hours"
+];
+
+// — modified functions —
 function computeMissing(ex: Extracted): string[] {
-  const req: (keyof Extracted)[] = ["tone","idea","name","audience","features","privacy","auth","deep_work_hours"];
   const missing: string[] = [];
-  for (const k of req) {
+  for (const k of REQUIRED_DISCOVERY_FIELDS) {
     const v = (ex as any)[k];
-    if (k==="features") { if (!Array.isArray(v) || v.length===0) missing.push("features"); continue; }
-    if (v===null || v===undefined || v==="") missing.push(k);
+    if (k === "features") {
+      if (!Array.isArray(v) || v.length === 0) missing.push("features");
+      continue;
+    }
+    if (v === null || v === undefined || v === "") missing.push(k);
   }
   // tone is optional after first turn; if filled, don't treat as missing
-  if (ex.tone) { const i = missing.indexOf("tone"); if (i>=0) missing.splice(i,1); }
+  if (ex.tone) {
+    const i = missing.indexOf("tone");
+    if (i >= 0) missing.splice(i, 1);
+  }
   return missing;
 }
 
@@ -269,7 +295,17 @@ function parseAsEnvelope(raw: string): Envelope | null {
   }
 }
 
-function normalizeFromModel(raw: string | unknown, session_id: string, turn_id: string, turn_count: number, model: string, temperature: number | undefined, usage?: any, memoryExtracted?: Extracted): Envelope {
+function normalizeFromModel(
+  raw: string | unknown, 
+  session_id: string, 
+  turn_id: string, 
+  turn_count: number, 
+  model: string, 
+  temperature: number | undefined, 
+  usage?: any, 
+  memoryExtracted?: Extracted,
+  userText?: string
+): Envelope {
   let env: Envelope | null = null;
   if (typeof raw === "string") {
     env = parseAsEnvelope(raw);
@@ -280,41 +316,51 @@ function normalizeFromModel(raw: string | unknown, session_id: string, turn_id: 
     // fallback to text extraction
     return normalizeFromModelContent(raw, session_id, turn_id, turn_count, model, temperature, usage);
   }
+  
   // Merge extracted with memory
-  const merged = mergeExtracted(memoryExtracted, env.extracted);
-  const missingNow = computeMissing(merged);
+  let merged = mergeExtracted(memoryExtracted, env.extracted);
+
+  // If user explicitly said "no name", lock in sentinel
+  if (!merged.name && userText && saidNoName(userText)) {
+    merged = { ...merged, name: "(skip)" };
+  }
+
+  // Recompute missing without treating name as required
+  let missingNow = computeMissing(merged);
+  
   env.extracted = merged;
   env.status = env.status ?? { complete: false, missing: [], next_question: null };
   env.status.missing = missingNow;
   env.status.complete = missingNow.length === 0;
 
-  // Optional field: name
-  if (merged.name === "(skip)" || merged.name === "(no name)") {
-    env.status.missing = env.status.missing.filter(m => m !== "name");
-  }
-
-  // Duplicate guard
+  // Duplicate guard + name-ask suppression
   const q = (env.status.next_question ?? "").toLowerCase();
-  const known: Record<string, boolean> = {
+  const knows: Record<string, boolean> = {
     idea: !!merged.idea,
-    name: !!merged.name,
+    name: !!merged.name, // optional
     audience: !!merged.audience,
     features: (merged.features?.length ?? 0) > 0,
     privacy: !!merged.privacy,
     auth: !!merged.auth,
     deep_work_hours: !!merged.deep_work_hours
   };
+  const asksName = q.includes("name");
   const askedKnown =
-    (q.includes("idea") && known.idea) || (q.includes("name") && known.name) || (q.includes("audience") && known.audience) ||
-    (q.includes("feature") && known.features) || (q.includes("privacy") && known.privacy) ||
-    (q.includes("auth") && known.auth) || (q.includes("hour") && known.deep_work_hours);
+    (q.includes("idea") && knows.idea) ||
+    (q.includes("audience") && knows.audience) ||
+    (q.includes("feature") && knows.features) ||
+    (q.includes("privacy") && knows.privacy) ||
+    (q.includes("auth") && knows.auth) ||
+    (q.includes("hour") && knows.deep_work_hours) ||
+    // treat name as "known enough" if it was skipped — never loop on it
+    (asksName && (merged.name === "(skip)" || !wantsNaming(userText ?? "")));
 
-  if (askedKnown || !env.status.next_question) {
+  if (askedKnown || !env.status.next_question || (asksName && !wantsNaming(userText ?? "") && merged.name !== null)) {
+    // select first truly missing (name is never in missingNow)
     const nextKey = missingNow[0];
     if (nextKey) {
       const friendly: Record<string, string> = {
         idea: "What's your app idea in one short line?",
-        name: "Do you have a name in mind? If not, I can suggest a few.",
         audience: "Who's your target audience?",
         features: "List 2–3 key features you want first.",
         privacy: "Do you want the project to be Private, Share via link, or Public?",
@@ -322,8 +368,8 @@ function normalizeFromModel(raw: string | unknown, session_id: string, turn_id: 
         deep_work_hours: "How many hours can you focus at a time? 0.5, 1, 2, or 4+?"
       };
       env.status.next_question = friendly[nextKey] ?? `Could you share ${nextKey.replaceAll("_", " ")}?`;
-      if (askedKnown) {
-        env.reply_to_user = `${env.reply_to_user}\n\n(We already have that. Next up:) ${env.status.next_question}`;
+      if (askedKnown || asksName) {
+        env.reply_to_user = `${env.reply_to_user}\n\n(We won't worry about a name unless you ask. Next up:) ${env.status.next_question}`;
       }
     } else {
       env.status.next_question = null;
@@ -332,7 +378,8 @@ function normalizeFromModel(raw: string | unknown, session_id: string, turn_id: 
   }
 
   if (usage) env.meta.usage = usage;
-  env.meta.model = model; env.meta.temperature = temperature;
+  env.meta.model = model; 
+  env.meta.temperature = temperature;
   return env;
 }
 
@@ -666,7 +713,7 @@ Deno.serve(async (req) => {
     const completion = tryJSON<any>(raw);
     const msg = completion?.choices?.[0]?.message;
     const contentAny: unknown = msg?.content ?? msg;
-    const env = normalizeFromModel(contentAny as any, session_id, turn_id, turn_count, pick.model, body.temperature as number | undefined, completion?.usage, memoryExtracted);
+    const env = normalizeFromModel(contentAny as any, session_id, turn_id, turn_count, pick.model, body.temperature as number | undefined, completion?.usage, memoryExtracted, userText);
     return withCors(req, JSON.stringify(env), { status: 200 });
   } catch (err) {
     return withCors(req, JSON.stringify(safeEnvelope({
