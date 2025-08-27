@@ -1,15 +1,13 @@
 /**
 	•	CP Edge Function: cp-chat
-	•	Version: m3.21-deterministic-orchestrator
+	•	Version: m3.22-reply-enforcer
 	•	
-	•	Summary of changes:
-	•		•	Deterministic server-side orchestrator: server (not the model) selects status.next_question.
-	•		•	Schema coercion for extracted (defaults, type safety).
-	•		•	skip_map (generalized, persistent) with skip-intent detection.
-	•		•	Last-write-wins merge (client memory ⊕ model output).
-	•		•	Multi-field extraction preserved (model can fill multiple fields; server accepts all).
-	•		•	Echo meta.model, meta.temperature, meta.usage, and meta.skip_map.
-	•		•	Capability-aware temperature handling and intent-based model switching preserved.
+	•	Patch summary:
+	•		•	No heuristics added.
+	•		•	Enforce that the rendered reply matches the deterministic flow:
+	•	• Remove model-asked questions and sentences about known/skipped fields.
+	•	• Append exactly one server-picked next_question (if any).
+	•		•	Keeps m3.21 deterministic orchestrator intact.
 	•	
 	•	Notes:
 	•		•	No external deps; runs in Supabase Edge (Deno).
@@ -28,7 +26,7 @@ const DEV_UNSAFE_ALLOW_KEY = (Deno.env.get("DEV_UNSAFE_ALLOW_KEY") ?? "false").t
 const CP_MODEL_DEFAULT = Deno.env.get("CP_MODEL_DEFAULT") ?? "gpt-5";          // deep / code
 const CP_MODEL_MINI = Deno.env.get("CP_MODEL_MINI") ?? "gpt-4.1-mini";         // chat / brainstorm
 const CP_PRICE_TABLE_RAW = Deno.env.get("CP_PRICE_TABLE") ?? "";
-const CP_VERSION = "m3.21-deterministic-orchestrator";
+const CP_VERSION = "m3.22-reply-enforcer";
 
 type PriceTable = Record<string, { in: number; out: number }>;
 function parsePriceTable(): PriceTable { try { const j = JSON.parse(CP_PRICE_TABLE_RAW); if (j && typeof j === "object") return j as PriceTable; } catch {} return {}; }
@@ -410,6 +408,52 @@ function computeNextQuestion(ex: Extracted, skip_map: SkipMap): string | null {
 }
 
 /* ──────────────────────────────────────────────────────────────────────────────
+REPLY ENFORCER (no heuristics)
+	•	Keep only non-question statements from the model.
+	•	Drop statements mentioning fields that are already known or skipped.
+	•	Append exactly one deterministic next_question from server.
+────────────────────────────────────────────────────────────────────────────── */
+
+const FIELD_PATTERNS: Partial<Record<keyof Extracted, RegExp[]>> = {
+  idea: [/\b(app )?idea\b/i, /\bwhat does it do\b/i, /\bproblem does it solve\b/i],
+  name: [/\bname(d)?\b/i, /\bcall it\b/i],
+  audience: [/\baudience\b/i, /\bwho (will|is) (use|using)\b/i, /\bwho is it for\b/i, /\busers?\b/i, /\bfamily\b/i],
+  features: [/\bfeatures?\b/i, /\bcapabilit(y|ies)\b/i, /\bwhat (do you|does it) need\b/i],
+  privacy: [/\bprivacy\b/i, /\bpublic\b/i, /\bshare via link\b/i, /\bprivate\b/i],
+  auth: [/\bauth(entication)?\b/i, /\bsign[- ]?in\b/i, /\blog ?in\b/i, /\boauth\b/i, /\bmagic (email )?link\b/i],
+  deep_work_hours: [/\bdeep[- ]?work\b/i, /\bhours?\b/i, /\bfocus\b/i]
+};
+
+function mentionsKnownOrSkipped(sentence: string, ex: Extracted, skip: SkipMap): boolean {
+  for (const key of Object.keys(FIELD_PATTERNS) as (keyof Extracted)[]) {
+    const regs = FIELD_PATTERNS[key] || [];
+    const known = key === "features" ? (ex.features?.length ?? 0) > 0 : Boolean((ex as any)[key]);
+    if ((known || skip[key]) && regs.some(re => re.test(sentence))) return true;
+  }
+  return false;
+}
+
+function enforceReplyText(modelReply: string, ex: Extracted, skip: SkipMap, nextQ: string | null): string {
+  let text = toText(modelReply).trim();
+  if (!text) text = "OK.";
+
+  // Split into sentences; keep only non-questions.
+  const sentences = text.split(/(?<=[.!?])\s+/).filter(Boolean);
+  const kept = sentences.filter(s => !/[?]\s*$/.test(s)); // drop any question from model
+
+  // Remove statements that mention fields we already know or have skipped.
+  const filtered = kept.filter(s => !mentionsKnownOrSkipped(s, ex, skip));
+
+  // Reassemble and append exactly one deterministic next question (if any).
+  let out = filtered.join(" ").trim();
+  if (nextQ) out = (out ? out + "\n\n" : "") + nextQ;
+
+  // If everything was filtered and no nextQ, keep a minimal ack.
+  if (!out) out = nextQ || "OK.";
+  return out;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────────
 NORMALIZATION OF MODEL OUTPUT → ENVELOPE
 (Server decides next_question; model's next_question is ignored)
 ────────────────────────────────────────────────────────────────────────────── */
@@ -436,7 +480,7 @@ function parseAsEnvelope(raw: string): Envelope | null {
 }
 
 /* ──────────────────────────────────────────────────────────────────────────────
-HTTP HANDLER
+HTTP HANDLER (only the final envelope composition changes to enforce reply)
 ────────────────────────────────────────────────────────────────────────────── */
 
 Deno.serve(async (req) => {
@@ -538,25 +582,27 @@ Deno.serve(async (req) => {
     const modelExtracted = env?.extracted ?? DEFAULT_EXTRACTED;
     const mergedExtracted = mergeExtracted(memoryExtracted, modelExtracted);
 
-    // If the model hinted skip(s), honor them (hint.skip: string[])
-    const hintSkip = (modelEnv as any)?.hint?.skip;
-    if (Array.isArray(hintSkip)) {
-      for (const k of hintSkip) {
-        if ((SKIPPABLE_FIELDS as string[]).includes(k)) skip_map[k as keyof Extracted] = true;
-      }
+  // honor model hint.skip if present
+  const hintSkip = (modelEnv as any)?.hint?.skip;
+  if (Array.isArray(hintSkip)) {
+    for (const k of hintSkip) {
+      if ((Object.keys(FRIENDLY_QUESTION) as string[]).includes(k)) skip_map[k as keyof Extracted] = true;
     }
+  }
 
-    // Compute missing & next question deterministically (server is source of truth)
-    const missingNow = computeMissing(mergedExtracted, skip_map);
-    const nextQ = computeNextQuestion(mergedExtracted, skip_map);
+  const missingNow = computeMissing(mergedExtracted, skip_map);
+  const nextQ = computeNextQuestion(mergedExtracted, skip_map);
 
-    // Final envelope
-    env = safeEnvelope({
-      ...env,
-      session_id,
-      turn_id,
-      success: true,
-      reply_to_user: env.reply_to_user || "OK.",
+  // ENFORCE reply text to align with deterministic nextQ
+  const enforcedReply = enforceReplyText(env.reply_to_user, mergedExtracted, skip_map, nextQ);
+
+  // Final envelope
+  env = safeEnvelope({
+    ...env,
+    session_id,
+    turn_id,
+    success: true,
+    reply_to_user: enforcedReply,
       extracted: mergedExtracted,
       status: { complete: missingNow.length === 0, missing: missingNow, next_question: nextQ },
       meta: {
