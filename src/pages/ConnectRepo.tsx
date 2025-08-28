@@ -26,27 +26,94 @@ const ConnectRepo = () => {
   // Handle OAuth callback
   useEffect(() => {
     const handleOAuthCallback = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      
-      if (session?.provider_token && session?.provider_refresh_token) {
+      try {
+        console.log('OAuth callback triggered, getting session...');
+        const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+        
+        if (sessionError) {
+          console.error('Session error:', sessionError);
+          toast({
+            title: "Authentication Error",
+            description: `Failed to get session: ${sessionError.message}`,
+            variant: "destructive",
+          });
+          return;
+        }
+
+        if (!session) {
+          console.error('No session found after OAuth callback');
+          toast({
+            title: "Authentication Error",
+            description: "No session found. Please try connecting GitHub again.",
+            variant: "destructive",
+          });
+          return;
+        }
+
+        console.log('Session found:', {
+          hasProviderToken: !!session.provider_token,
+          hasProviderRefreshToken: !!session.provider_refresh_token,
+          userId: session.user?.id
+        });
+
+        // Check if we have the necessary GitHub tokens
+        if (!session.provider_token) {
+          console.error('Missing provider_token in session');
+          toast({
+            title: "GitHub Connection Error",
+            description: "GitHub access token not received. Please ensure you granted permission and try again.",
+            variant: "destructive",
+          });
+          return;
+        }
+
+        if (!session.provider_refresh_token) {
+          console.warn('Missing provider_refresh_token - this might cause issues later');
+        }
+
+        console.log('Saving GitHub profile with access token...');
         const { error } = await saveGitHubProfile(session.provider_token);
+        
         if (error) {
+          console.error('Error saving GitHub profile:', error);
           toast({
             title: "Error",
-            description: error,
+            description: `Failed to save GitHub profile: ${error}`,
             variant: "destructive",
           });
         } else {
+          console.log('GitHub profile saved successfully, loading data...');
           toast({
             title: "Success",
             description: "GitHub account connected successfully!",
           });
-          loadGitHubData();
+          await loadGitHubData();
         }
+      } catch (error: any) {
+        console.error('Unexpected error in OAuth callback:', error);
+        toast({
+          title: "Unexpected Error",
+          description: `Something went wrong: ${error.message || 'Unknown error'}`,
+          variant: "destructive",
+        });
       }
     };
 
-    if (searchParams.get('code')) {
+    const authCode = searchParams.get('code');
+    const authError = searchParams.get('error');
+    
+    if (authError) {
+      console.error('OAuth error in URL:', authError);
+      toast({
+        title: "GitHub Authorization Error",
+        description: `GitHub returned an error: ${authError}`,
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (authCode) {
+      console.log('OAuth code found in URL, handling callback...');
       handleOAuthCallback();
     }
   }, [searchParams]);
