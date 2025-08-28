@@ -330,6 +330,7 @@ const ConnectRepo = () => {
                   isConnected={connectedRepos.includes(repo.full_name)}
                   isLovableProject={lovableProjects.has(repo.full_name)}
                   onConnectionChange={handleConnectionChange}
+                  githubToken={githubProfile?.github_access_token}
                 />
               ))}
             </div>

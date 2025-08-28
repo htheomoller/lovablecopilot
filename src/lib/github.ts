@@ -104,6 +104,28 @@ export class GitHubAPI {
       return false;
     }
   }
+
+  async runRepositoryAudit(repositoryUrl: string, userId: string): Promise<{ error?: string }> {
+    try {
+      const { data, error } = await supabase.functions.invoke('repository-audit', {
+        body: {
+          github_token: this.accessToken,
+          repository_url: repositoryUrl,
+          user_id: userId
+        }
+      });
+
+      if (error) {
+        console.error('Audit function error:', error);
+        return { error: error.message || 'Failed to run audit' };
+      }
+
+      return { error: data?.error };
+    } catch (error: any) {
+      console.error('Error running repository audit:', error);
+      return { error: error.message || 'Failed to run repository audit' };
+    }
+  }
 }
 
 export async function connectGitHubAccount(): Promise<{ error?: string }> {

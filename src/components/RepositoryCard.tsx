@@ -1,26 +1,33 @@
 import { useState } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { ExternalLink, GitBranch, Clock, CheckCircle, XCircle } from 'lucide-react';
-import { GitHubRepository } from '@/lib/github';
+import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { supabase } from '@/integrations/supabase/client';
 import { toast } from '@/hooks/use-toast';
+import { GitBranch, Calendar, Lock, Sparkles, Shield, Play, CheckCircle, AlertTriangle, XCircle, Loader2, ExternalLink, Clock } from 'lucide-react';
+import { GitHubAPI, GitHubRepository } from '@/lib/github';
+import { AuditResults } from './AuditResults';
 
 interface RepositoryCardProps {
   repository: GitHubRepository;
   isConnected: boolean;
   isLovableProject: boolean;
   onConnectionChange: (repoName: string, connected: boolean) => void;
+  githubToken?: string;
 }
 
 export const RepositoryCard = ({ 
   repository, 
   isConnected, 
-  isLovableProject,
-  onConnectionChange 
+  isLovableProject, 
+  onConnectionChange,
+  githubToken
 }: RepositoryCardProps) => {
   const [isLoading, setIsLoading] = useState(false);
+  const [auditStatus, setAuditStatus] = useState<'idle' | 'running' | 'completed' | 'error'>('idle');
+  const [auditResults, setAuditResults] = useState<any>(null);
+  const [showAuditResults, setShowAuditResults] = useState(false);
 
   const handleToggleConnection = async () => {
     try {
@@ -90,6 +97,79 @@ export const RepositoryCard = ({
     }
   };
 
+  const handleRunAudit = async () => {
+    if (!githubToken || !isLovableProject) {
+      toast({
+        title: "Cannot Run Audit",
+        description: isLovableProject ? "GitHub access token not available" : "Repository is not a Lovable project",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      setAuditStatus('running');
+      const github = new GitHubAPI(githubToken);
+      
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user?.id) {
+        throw new Error('User not authenticated');
+      }
+
+      const { error } = await github.runRepositoryAudit(repository.html_url, user.id);
+      
+      if (error) {
+        throw new Error(error);
+      }
+
+      // Fetch the audit results
+      const { data: auditData, error: fetchError } = await supabase
+        .from('repository_audits')
+        .select('*')
+        .eq('repository_name', repository.full_name)
+        .eq('user_id', user.id)
+        .order('last_audit_date', { ascending: false })
+        .limit(1)
+        .single();
+
+      if (fetchError) {
+        throw new Error('Failed to fetch audit results');
+      }
+
+      setAuditResults(auditData?.audit_results);
+      setAuditStatus('completed');
+      setShowAuditResults(true);
+
+      const auditReport = auditData?.audit_results as any;
+      toast({
+        title: "Audit Completed",
+        description: `Repository audit completed with score: ${auditReport?.overall_score || 'N/A'}`,
+      });
+
+    } catch (error: any) {
+      console.error('Error running audit:', error);
+      setAuditStatus('error');
+      toast({
+        title: "Audit Failed",
+        description: error.message || "Failed to run repository audit",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const getAuditStatusIcon = () => {
+    switch (auditStatus) {
+      case 'running':
+        return <Loader2 className="w-4 h-4 animate-spin" />;
+      case 'completed':
+        return <CheckCircle className="w-4 h-4 text-emerald-500" />;
+      case 'error':
+        return <XCircle className="w-4 h-4 text-red-500" />;
+      default:
+        return <Shield className="w-4 h-4" />;
+    }
+  };
+
   const formatDate = (dateString: string) => {
     return new Date(dateString).toLocaleDateString('en-US', {
       year: 'numeric',
@@ -99,7 +179,8 @@ export const RepositoryCard = ({
   };
 
   return (
-    <Card className="w-full">
+    <div>
+      <Card className="w-full">
       <CardHeader className="pb-3">
         <div className="flex items-start justify-between">
           <div className="space-y-1 flex-1">
@@ -158,16 +239,58 @@ export const RepositoryCard = ({
             )}
           </div>
           
-          <Button
-            onClick={handleToggleConnection}
-            disabled={isLoading}
-            variant={isConnected ? "destructive" : "default"}
-            size="sm"
-          >
-            {isLoading ? 'Processing...' : (isConnected ? 'Disconnect' : 'Connect')}
-          </Button>
+          <div className="flex gap-2">
+            {isConnected && isLovableProject && (
+              <Button
+                onClick={handleRunAudit}
+                disabled={auditStatus === 'running'}
+                variant="secondary"
+                size="sm"
+              >
+                {getAuditStatusIcon()}
+                <span className="ml-2">
+                  {auditStatus === 'running' ? 'Auditing...' : 'Run Audit'}
+                </span>
+              </Button>
+            )}
+            
+            {auditStatus === 'completed' && auditResults && (
+              <Button
+                onClick={() => setShowAuditResults(true)}
+                variant="outline"
+                size="sm"
+              >
+                <AlertTriangle className="w-4 h-4 mr-2" />
+                View Results
+              </Button>
+            )}
+
+            <Button
+              onClick={handleToggleConnection}
+              disabled={isLoading}
+              variant={isConnected ? "outline" : "default"}
+              size="sm"
+            >
+              {isLoading ? "Processing..." : (isConnected ? "Disconnect" : "Connect")}
+            </Button>
+          </div>
         </div>
       </CardContent>
     </Card>
+
+    <Dialog open={showAuditResults} onOpenChange={setShowAuditResults}>
+      <DialogContent className="max-w-4xl max-h-[80vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Audit Results - {repository.name}</DialogTitle>
+        </DialogHeader>
+        {auditResults && (
+          <AuditResults 
+            auditReport={auditResults}
+            onClose={() => setShowAuditResults(false)}
+          />
+        )}
+      </DialogContent>
+    </Dialog>
+  </div>
   );
 };
