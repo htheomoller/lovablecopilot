@@ -51,6 +51,13 @@ const ConnectRepo = () => {
     }
   }, [searchParams]);
 
+  // Load GitHub data when user is authenticated
+  useEffect(() => {
+    if (user && !authLoading) {
+      loadGitHubData();
+    }
+  }, [user, authLoading]);
+
   // Load GitHub profile and repositories
   const loadGitHubData = async () => {
     try {
@@ -60,7 +67,7 @@ const ConnectRepo = () => {
         .from('profiles')
         .select('*')
         .eq('id', user?.id)
-        .single();
+        .maybeSingle();
 
       if (!profile?.github_access_token) {
         setLoading(false);
