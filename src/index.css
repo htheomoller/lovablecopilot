@@ -12,6 +12,9 @@ All colors MUST be HSL.
     --background: 0 0% 98%;
     --foreground: 224 71% 4%;
     
+    /* Page backgrounds */
+    --page-background: 0 0% 98%;
+    
     --chat-background: 0 0% 98%;
     --user-bubble: 220 9% 46%;
     --assistant-bubble: 0 0% 100%;
@@ -71,6 +74,9 @@ All colors MUST be HSL.
     /* CoPilot Dark Theme */
     --background: 224 71% 4%;
     --foreground: 210 40% 98%;
+    
+    /* Page backgrounds */
+    --page-background: 224 71% 4%;
 
     --card: 224 71% 4%;
     --card-foreground: 210 40% 98%;
