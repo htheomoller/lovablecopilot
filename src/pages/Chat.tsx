@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { callCpChat, getCpChatUrl, pingCpChat } from "../lib/cpClient";
 import { Send } from "lucide-react";
+import { useAuth } from '@/contexts/AuthContext';
+import { Navigate } from 'react-router-dom';
+import { AppLayout } from '@/components/AppLayout';
 
 type Envelope = {
   success: boolean; mode: "chat"; session_id: string; turn_id: string;
@@ -82,6 +85,20 @@ function formatReply(raw: unknown): string {
 }
 
 export default function ChatPage() {
+  const { user, loading } = useAuth();
+
+  // Redirect if not authenticated
+  if (!loading && !user) {
+    return <Navigate to="/auth" replace />;
+  }
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-hero">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+      </div>
+    );
+  }
   const [messages, setMessages] = useState<ChatItem[]>([
     { role:"assistant", content:"Hi! I'm CP, your Lovable project assistant. I can help you plan, generate code, and guide you through building your app. What would you like to work on today?" }
   ]);
@@ -166,38 +183,39 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="flex flex-col h-screen" style={{ backgroundColor: 'hsl(var(--chat-background))' }}>
-      {/* Header - Minimal like ChatGPT */}
-      <header className="flex-shrink-0 border-b border-border bg-background/80 backdrop-blur-sm">
-        <div className="max-w-4xl mx-auto px-4 py-3">
-          <div className="flex items-center justify-between">
-            <div>
-              <h1 className="text-lg font-semibold text-foreground">CoPilot Chat</h1>
-              <p className="text-sm text-muted-foreground">Your Lovable project assistant</p>
+    <AppLayout>
+      <div className="flex flex-col h-screen" style={{ backgroundColor: 'hsl(var(--chat-background))' }}>
+        {/* Header - Minimal like ChatGPT */}
+        <header className="flex-shrink-0 border-b border-border bg-background/80 backdrop-blur-sm">
+          <div className="max-w-4xl mx-auto px-4 py-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <h1 className="text-lg font-semibold text-foreground">CoPilot Chat</h1>
+                <p className="text-sm text-muted-foreground">Your Lovable project assistant</p>
+              </div>
+              <button 
+                onClick={pingFunction} 
+                className="text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted/50 text-muted-foreground transition-colors"
+              >
+                Test Connection
+              </button>
             </div>
-            <button 
-              onClick={pingFunction} 
-              className="text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted/50 text-muted-foreground transition-colors"
-            >
-              Test Connection
-            </button>
+            {lastError && <Banner kind="error">{lastError}</Banner>}
+            {diag && (
+              <div className="mt-2 p-3 rounded-lg bg-muted/30 text-xs font-mono text-muted-foreground">
+                <div>Status: {diag.status}</div>
+                {typeof diag.sample === "string" ? (
+                  <pre className="mt-1 whitespace-pre-wrap">{diag.sample}</pre>
+                ) : diag.sample ? (
+                  <pre className="mt-1 whitespace-pre-wrap">{JSON.stringify(diag.sample, null, 2)}</pre>
+                ) : null}
+              </div>
+            )}
           </div>
-          {lastError && <Banner kind="error">{lastError}</Banner>}
-          {diag && (
-            <div className="mt-2 p-3 rounded-lg bg-muted/30 text-xs font-mono text-muted-foreground">
-              <div>Status: {diag.status}</div>
-              {typeof diag.sample === "string" ? (
-                <pre className="mt-1 whitespace-pre-wrap">{diag.sample}</pre>
-              ) : diag.sample ? (
-                <pre className="mt-1 whitespace-pre-wrap">{JSON.stringify(diag.sample, null, 2)}</pre>
-              ) : null}
-            </div>
-          )}
-        </div>
-      </header>
+        </header>
 
-      {/* Chat Messages */}
-      <main className="flex-1 overflow-y-auto">
+        {/* Chat Messages */}
+        <main className="flex-1 overflow-y-auto">
         <div className="max-w-4xl mx-auto px-4 py-6">
           <div className="space-y-6">
             {messages.map((message, index) => {
@@ -262,10 +280,9 @@ export default function ChatPage() {
                         </>
                       )}
                     </div>
-        </div>
-      </div>
-    </AppLayout>
-  );
+                  </div>
+                </div>
+              );
             })}
             <div ref={messagesEndRef} />
           </div>
@@ -310,7 +327,8 @@ export default function ChatPage() {
             Press Enter to send • Shift+Enter for new line
           </div>
         </div>
-      </footer>
-    </div>
+        </footer>
+      </div>
+    </AppLayout>
   );
 }

@@ -10,6 +10,7 @@ import { RepositoryCard } from '@/components/RepositoryCard';
 import { GitHubAPI, GitHubRepository, saveGitHubProfile, disconnectGitHub } from '@/lib/github';
 import { supabase } from '@/integrations/supabase/client';
 import { toast } from '@/hooks/use-toast';
+import { AppLayout } from '@/components/AppLayout';
 import { Github, Search, RefreshCw, Unlink } from 'lucide-react';
 
 const ConnectRepo = () => {
@@ -238,7 +239,8 @@ const ConnectRepo = () => {
   }
 
   return (
-    <div className="min-h-screen bg-background p-4">
+    <AppLayout>
+      <div className="min-h-screen bg-background p-4">
       <div className="container max-w-6xl mx-auto space-y-6">
         <div className="flex items-center justify-between">
           <div>
@@ -356,8 +358,9 @@ const ConnectRepo = () => {
             )}
           </div>
         )}
+        </div>
       </div>
-    </div>
+    </AppLayout>
   );
 };
 

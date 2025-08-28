@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import EnvBadge from '@/components/EnvBadge';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
+import { AppLayout } from '@/components/AppLayout';
 
 export default function Health() {
   const { user } = useAuth();
@@ -94,7 +95,8 @@ export default function Health() {
   useEffect(() => { refreshCounts(); }, []);
 
   return (
-    <div className="p-4 space-y-4">
+    <AppLayout>
+      <div className="p-4 space-y-4">
       <EnvBadge />
       <h1 className="text-xl font-bold">Health Dashboard</h1>
       <p className="text-sm opacity-80">If you see ENV as DEV or PREVIEW above, /health should be allowed by AuthGate.</p>
@@ -120,5 +122,6 @@ export default function Health() {
         <button disabled={running} onClick={runSelfTests} className="px-3 py-2 border rounded">{running ? 'Running…' : 'Run Self-Tests'}</button>
       </section>
     </div>
+    </AppLayout>
   );
 }

@@ -3,6 +3,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/integrations/supabase/client';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { AppLayout } from '@/components/AppLayout';
 import { logBreadcrumb } from '@/lib/devlog';
 
 interface Milestone {
@@ -95,7 +96,8 @@ const Roadmap = () => {
   };
   
   return (
-    <div className="p-8 space-y-6">
+    <AppLayout>
+      <div className="p-8 space-y-6">
       <div>
         <h1 className="text-3xl font-bold">Project Roadmap</h1>
         <p className="text-muted-foreground">Track milestone progress and timeline</p>
@@ -150,10 +152,11 @@ const Roadmap = () => {
               </CardContent>
             </Card>
           ))}
-        </div>
-      )}
-    </div>
-  );
+         </div>
+       )}
+     </div>
+   </AppLayout>
+ );
 };
 
 export default Roadmap;
