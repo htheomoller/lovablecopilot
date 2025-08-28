@@ -41,7 +41,7 @@ const ConnectRepo = () => {
   // Check for existing GitHub tokens on mount
   useEffect(() => {
     const checkExistingGitHubToken = async () => {
-      if (!user) return;
+      if (!user?.id) return;
       
       const { data: { session } } = await supabase.auth.getSession();
       
@@ -51,7 +51,7 @@ const ConnectRepo = () => {
           .from('profiles')
           .select('github_access_token')
           .eq('id', user.id)
-          .single();
+          .maybeSingle();
           
         if (!profile?.github_access_token) {
           // Token exists in session but not in profile, save it
@@ -61,13 +61,19 @@ const ConnectRepo = () => {
       }
     };
 
-    if (user) {
+    if (user?.id) {
       checkExistingGitHubToken();
     }
   }, [user]);
 
   const handleGitHubOAuthComplete = async (providerToken: string) => {
     try {
+      // Ensure we have a valid user before proceeding
+      if (!user?.id) {
+        console.warn('No user available for GitHub OAuth completion');
+        return;
+      }
+
       console.log('Saving GitHub profile with access token...');
       const { error } = await saveGitHubProfile(providerToken);
       
@@ -108,10 +114,17 @@ const ConnectRepo = () => {
     try {
       setLoading(true);
       
+      // Ensure we have a valid user before making database queries
+      if (!user?.id) {
+        console.warn('No user available for loading GitHub data');
+        setLoading(false);
+        return;
+      }
+      
       let { data: profile } = await supabase
         .from('profiles')
         .select('*')
-        .eq('id', user?.id)
+        .eq('id', user.id)
         .maybeSingle();
 
       // If no profile exists, create one (fallback for missing profiles)
@@ -119,9 +132,9 @@ const ConnectRepo = () => {
         const { data: newProfile, error: createError } = await supabase
           .from('profiles')
           .insert({
-            id: user!.id,
-            email: user!.email || '',
-            name: user!.email || 'Unknown User'
+            id: user.id,
+            email: user.email || '',
+            name: user.email || 'Unknown User'
           })
           .select()
           .single();
