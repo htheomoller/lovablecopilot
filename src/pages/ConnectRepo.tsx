@@ -24,100 +24,77 @@ const ConnectRepo = () => {
   const [githubProfile, setGithubProfile] = useState<any>(null);
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Handle OAuth callback
+  // Handle GitHub OAuth completions via auth state changes
   useEffect(() => {
-    const handleOAuthCallback = async () => {
-      try {
-        console.log('OAuth callback triggered, getting session...');
-        const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-        
-        if (sessionError) {
-          console.error('Session error:', sessionError);
-          toast({
-            title: "Authentication Error",
-            description: `Failed to get session: ${sessionError.message}`,
-            variant: "destructive",
-          });
-          return;
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (event, session) => {
+        if (event === 'SIGNED_IN' && session?.provider_token && session.user) {
+          console.log('GitHub OAuth detected, saving profile...');
+          await handleGitHubOAuthComplete(session.provider_token);
         }
+      }
+    );
 
-        if (!session) {
-          console.error('No session found after OAuth callback');
-          toast({
-            title: "Authentication Error",
-            description: "No session found. Please try connecting GitHub again.",
-            variant: "destructive",
-          });
-          return;
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // Check for existing GitHub tokens on mount
+  useEffect(() => {
+    const checkExistingGitHubToken = async () => {
+      if (!user) return;
+      
+      const { data: { session } } = await supabase.auth.getSession();
+      
+      if (session?.provider_token) {
+        // We have a GitHub token but need to check if it's saved to profile
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('github_access_token')
+          .eq('id', user.id)
+          .single();
+          
+        if (!profile?.github_access_token) {
+          // Token exists in session but not in profile, save it
+          console.log('Found unsaved GitHub token, saving...');
+          await handleGitHubOAuthComplete(session.provider_token);
         }
-
-        console.log('Session found:', {
-          hasProviderToken: !!session.provider_token,
-          hasProviderRefreshToken: !!session.provider_refresh_token,
-          userId: session.user?.id
-        });
-
-        // Check if we have the necessary GitHub tokens
-        if (!session.provider_token) {
-          console.error('Missing provider_token in session');
-          toast({
-            title: "GitHub Connection Error",
-            description: "GitHub access token not received. Please ensure you granted permission and try again.",
-            variant: "destructive",
-          });
-          return;
-        }
-
-        if (!session.provider_refresh_token) {
-          console.warn('Missing provider_refresh_token - this might cause issues later');
-        }
-
-        console.log('Saving GitHub profile with access token...');
-        const { error } = await saveGitHubProfile(session.provider_token);
-        
-        if (error) {
-          console.error('Error saving GitHub profile:', error);
-          toast({
-            title: "Error",
-            description: `Failed to save GitHub profile: ${error}`,
-            variant: "destructive",
-          });
-        } else {
-          console.log('GitHub profile saved successfully, loading data...');
-          toast({
-            title: "Success",
-            description: "GitHub account connected successfully!",
-          });
-          await loadGitHubData();
-        }
-      } catch (error: any) {
-        console.error('Unexpected error in OAuth callback:', error);
-        toast({
-          title: "Unexpected Error",
-          description: `Something went wrong: ${error.message || 'Unknown error'}`,
-          variant: "destructive",
-        });
       }
     };
 
-    const authCode = searchParams.get('code');
-    const authError = searchParams.get('error');
-    
-    if (authError) {
-      console.error('OAuth error in URL:', authError);
+    if (user) {
+      checkExistingGitHubToken();
+    }
+  }, [user]);
+
+  const handleGitHubOAuthComplete = async (providerToken: string) => {
+    try {
+      console.log('Saving GitHub profile with access token...');
+      const { error } = await saveGitHubProfile(providerToken);
+      
+      if (error) {
+        console.error('Error saving GitHub profile:', error);
+        toast({
+          title: "Error",
+          description: `Failed to save GitHub profile: ${error}`,
+          variant: "destructive",
+        });
+      } else {
+        console.log('GitHub profile saved successfully, loading data...');
+        toast({
+          title: "Success",
+          description: "GitHub account connected successfully!",
+        });
+        await loadGitHubData();
+      }
+    } catch (error: any) {
+      console.error('GitHub OAuth completion error:', error);
       toast({
-        title: "GitHub Authorization Error",
-        description: `GitHub returned an error: ${authError}`,
+        title: "Connection Error", 
+        description: error.message || "Failed to save GitHub connection",
         variant: "destructive",
       });
-      return;
     }
-
-    if (authCode) {
-      console.log('OAuth code found in URL, handling callback...');
-      handleOAuthCallback();
-    }
-  }, [searchParams]);
+  };
 
   // Load GitHub data when user is authenticated
   useEffect(() => {
