@@ -262,9 +262,10 @@ export default function ChatPage() {
                         </>
                       )}
                     </div>
-                  </div>
-                </div>
-              );
+        </div>
+      </div>
+    </AppLayout>
+  );
             })}
             <div ref={messagesEndRef} />
           </div>
