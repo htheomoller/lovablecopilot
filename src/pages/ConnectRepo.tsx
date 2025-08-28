@@ -131,11 +131,37 @@ const ConnectRepo = () => {
     try {
       setLoading(true);
       
-      const { data: profile } = await supabase
+      let { data: profile } = await supabase
         .from('profiles')
         .select('*')
         .eq('id', user?.id)
         .maybeSingle();
+
+      // If no profile exists, create one (fallback for missing profiles)
+      if (!profile) {
+        const { data: newProfile, error: createError } = await supabase
+          .from('profiles')
+          .insert({
+            id: user!.id,
+            email: user!.email || '',
+            name: user!.email || 'Unknown User'
+          })
+          .select()
+          .single();
+        
+        if (createError) {
+          console.error('Error creating profile:', createError);
+          toast({
+            title: "Profile Error",
+            description: "Failed to create user profile. Please try refreshing the page.",
+            variant: "destructive",
+          });
+          setLoading(false);
+          return;
+        }
+        
+        profile = newProfile;
+      }
 
       if (!profile?.github_access_token) {
         setLoading(false);

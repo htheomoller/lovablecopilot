@@ -128,45 +128,24 @@ export class GitHubAPI {
   }
 }
 
-export async function connectGitHubAccount(): Promise<{ error?: string }> {
+export const connectGitHubAccount = async () => {
   try {
     const redirectUrl = `${window.location.origin}/connect-repo`;
-    
-    // Check if we're in an iframe (like Lovable preview) and open in new window
-    const isInIframe = window.parent !== window;
     
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'github',
       options: {
         redirectTo: redirectUrl,
-        scopes: 'repo read:user',
-        // Open in new window if in iframe to avoid security restrictions
-        skipBrowserRedirect: isInIframe
+        scopes: 'repo read:user'
       }
     });
-
-    if (isInIframe && !error) {
-      // Get the OAuth URL and open in new window
-      const { data } = await supabase.auth.signInWithOAuth({
-        provider: 'github',
-        options: {
-          redirectTo: redirectUrl,
-          scopes: 'repo read:user',
-          skipBrowserRedirect: true
-        }
-      });
-      
-      if (data?.url) {
-        window.open(data.url, '_blank', 'width=600,height=700');
-        return { error: undefined };
-      }
-    }
-    
+     
     return { error: error?.message };
   } catch (error: any) {
+    console.error('Error connecting GitHub account:', error);
     return { error: error.message || 'Failed to connect GitHub account' };
   }
-}
+};
 
 export async function saveGitHubProfile(accessToken: string): Promise<{ error?: string }> {
   try {
