@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { useNavigate } from 'react-router-dom';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { supabase } from '@/integrations/supabase/client';
@@ -31,6 +32,7 @@ interface AuditRecord {
 
 const AuditResults = () => {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [auditRecords, setAuditRecords] = useState<AuditRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedAudit, setSelectedAudit] = useState<AuditRecord | null>(null);
@@ -161,7 +163,7 @@ const AuditResults = () => {
                   : "You haven't run any repository audits yet."
                 }
               </p>
-              <Button onClick={() => window.location.href = '/connect-repo'}>
+              <Button onClick={() => navigate('/connect-repo')}>
                 Connect Repository
               </Button>
             </CardContent>

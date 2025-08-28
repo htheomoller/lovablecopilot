@@ -2,7 +2,7 @@ import React from 'react';
 import { SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar';
 import { AppSidebar } from './AppSidebar';
 import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from '@/components/ui/breadcrumb';
-import { useLocation } from 'react-router-dom';
+import { useLocation, Link } from 'react-router-dom';
 
 interface AppLayoutProps {
   children: React.ReactNode;
@@ -37,7 +37,9 @@ export function AppLayout({ children }: AppLayoutProps) {
             <Breadcrumb>
               <BreadcrumbList>
                 <BreadcrumbItem>
-                  <BreadcrumbLink href="/dashboard">Dashboard</BreadcrumbLink>
+                  <BreadcrumbLink asChild>
+                    <Link to="/dashboard">Dashboard</Link>
+                  </BreadcrumbLink>
                 </BreadcrumbItem>
                 {currentPath !== '/dashboard' && (
                   <>

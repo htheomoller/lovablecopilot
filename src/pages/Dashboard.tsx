@@ -1,12 +1,13 @@
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useAuth } from '@/contexts/AuthContext';
-import { Navigate } from 'react-router-dom';
+import { Navigate, useNavigate } from 'react-router-dom';
 import { toast } from '@/hooks/use-toast';
 import { AppLayout } from '@/components/AppLayout';
 
 const Dashboard = () => {
   const { user, loading } = useAuth();
+  const navigate = useNavigate();
 
   // Redirect if not authenticated
   if (!loading && !user) {
@@ -47,21 +48,21 @@ const Dashboard = () => {
                     <Button 
                       variant="ghost" 
                       className="w-full justify-start"
-                      onClick={() => window.location.href = '/connect-repo'}
+                      onClick={() => navigate('/connect-repo')}
                     >
                       Connect Repository
                     </Button>
                     <Button 
                       variant="ghost" 
                       className="w-full justify-start"
-                      onClick={() => window.location.href = '/audit-results'}
+                      onClick={() => navigate('/audit-results')}
                     >
                       View Audit Results
                     </Button>
                     <Button 
                       variant="ghost" 
                       className="w-full justify-start"
-                      onClick={() => window.location.href = '/settings'}
+                      onClick={() => navigate('/settings')}
                     >
                       Settings
                     </Button>
@@ -109,21 +110,21 @@ const Dashboard = () => {
                     <Button 
                       variant="ghost" 
                       className="w-full justify-start text-sm"
-                      onClick={() => window.location.href = '/roadmap'}
+                      onClick={() => navigate('/roadmap')}
                     >
                       Roadmap
                     </Button>
                     <Button 
                       variant="ghost" 
                       className="w-full justify-start text-sm"
-                      onClick={() => window.location.href = '/health'}
+                      onClick={() => navigate('/health')}
                     >
                       Health Check
                     </Button>
                     <Button 
                       variant="ghost" 
                       className="w-full justify-start text-sm"
-                      onClick={() => window.location.href = '/chat'}
+                      onClick={() => navigate('/chat')}
                     >
                       AI Assistant
                     </Button>
