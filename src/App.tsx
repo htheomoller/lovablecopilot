@@ -11,6 +11,7 @@ import Dashboard from "./pages/Dashboard";
 import Chat from "./pages/Chat";
 import Roadmap from "./pages/Roadmap";
 import Health from "./pages/Health";
+import ConnectRepo from "./pages/ConnectRepo";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -31,6 +32,7 @@ const App = () => (
               <Route path="/roadmap" element={<Roadmap />} />
               <Route path="/health" element={<Health />} />
               <Route path="/self-test" element={<Health />} />
+              <Route path="/connect-repo" element={<ConnectRepo />} />
               {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
               <Route path="*" element={<NotFound />} />
             </Routes>

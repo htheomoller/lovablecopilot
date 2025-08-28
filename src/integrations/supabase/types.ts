@@ -109,23 +109,35 @@ export type Database = {
       }
       profiles: {
         Row: {
+          connected_repositories: Json | null
           created_at: string
           email: string
+          github_access_token: string | null
+          github_username: string | null
           id: string
+          last_github_sync: string | null
           name: string | null
           website: string | null
         }
         Insert: {
+          connected_repositories?: Json | null
           created_at?: string
           email: string
+          github_access_token?: string | null
+          github_username?: string | null
           id: string
+          last_github_sync?: string | null
           name?: string | null
           website?: string | null
         }
         Update: {
+          connected_repositories?: Json | null
           created_at?: string
           email?: string
+          github_access_token?: string | null
+          github_username?: string | null
           id?: string
+          last_github_sync?: string | null
           name?: string | null
           website?: string | null
         }
@@ -157,6 +169,50 @@ export type Database = {
           v?: Json
         }
         Relationships: []
+      }
+      repository_audits: {
+        Row: {
+          audit_results: Json | null
+          audit_status: string | null
+          created_at: string
+          id: string
+          last_audit_date: string | null
+          repository_name: string
+          repository_url: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          audit_results?: Json | null
+          audit_status?: string | null
+          created_at?: string
+          id?: string
+          last_audit_date?: string | null
+          repository_name: string
+          repository_url: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          audit_results?: Json | null
+          audit_status?: string | null
+          created_at?: string
+          id?: string
+          last_audit_date?: string | null
+          repository_name?: string
+          repository_url?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "repository_audits_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
       }
     }
     Views: {
