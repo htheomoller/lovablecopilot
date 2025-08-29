@@ -150,26 +150,33 @@ class RepositoryAuditor {
 
     // Enhanced sandbox block detection patterns with context validation
     const sandboxPatterns = [
-      { pattern: /\/\/\s*SANDBOX_START/gi, weight: 1 },
-      { pattern: /\/\*\s*SANDBOX_START\s*\*\//gi, weight: 1 },
-      { pattern: /\/\/\s*TEMP_START/gi, weight: 1 },
-      { pattern: /\/\*\s*TEMP_START\s*\*\//gi, weight: 1 },
-      { pattern: /\/\/\s*DEBUG_START/gi, weight: 1 },
-      { pattern: /\/\*\s*DEBUG_START\s*\*\//gi, weight: 1 },
-      { pattern: /\/\/\s*DEV_START/gi, weight: 1 },
-      { pattern: /\/\*\s*DEV_START\s*\*\//gi, weight: 1 },
-      { pattern: /\/\/\s*@sandbox/gi, weight: 0.8 },
-      { pattern: /\/\*\s*@sandbox\s*\*\//gi, weight: 0.8 },
-      { pattern: /\/\/\s*@dev/gi, weight: 0.6 },
-      { pattern: /\/\*\s*@dev\s*\*\//gi, weight: 0.6 },
-      { pattern: /\/\/\s*TODO.*remove/gi, weight: 0.7 },
-      { pattern: /\/\*\s*TODO.*replace.*\*\//gi, weight: 0.7 },
-      { pattern: /const\s+(temp|tmp|mock|placeholder)\w*/gi, weight: 0.5 },
-      { pattern: /let\s+(temp|tmp|mock|placeholder)\w*/gi, weight: 0.5 },
-      { pattern: /console\.log\(/gi, weight: 0.3 }
+      { pattern: /\/\/\s*SANDBOX_START/gi, weight: 1, name: 'SANDBOX_START' },
+      { pattern: /\/\*\s*SANDBOX_START\s*\*\//gi, weight: 1, name: 'SANDBOX_START_BLOCK' },
+      { pattern: /\/\/\s*TEMP_START/gi, weight: 1, name: 'TEMP_START' },
+      { pattern: /\/\*\s*TEMP_START\s*\*\//gi, weight: 1, name: 'TEMP_START_BLOCK' },
+      { pattern: /\/\/\s*DEBUG_START/gi, weight: 1, name: 'DEBUG_START' },
+      { pattern: /\/\*\s*DEBUG_START\s*\*\//gi, weight: 1, name: 'DEBUG_START_BLOCK' },
+      { pattern: /\/\/\s*DEV_START/gi, weight: 1, name: 'DEV_START' },
+      { pattern: /\/\*\s*DEV_START\s*\*\//gi, weight: 1, name: 'DEV_START_BLOCK' },
+      { pattern: /\/\/\s*@sandbox/gi, weight: 0.8, name: 'SANDBOX_TAG' },
+      { pattern: /\/\*\s*@sandbox\s*\*\//gi, weight: 0.8, name: 'SANDBOX_TAG_BLOCK' },
+      { pattern: /\/\/\s*@dev/gi, weight: 0.6, name: 'DEV_TAG' },
+      { pattern: /\/\*\s*@dev\s*\*\//gi, weight: 0.6, name: 'DEV_TAG_BLOCK' },
+      { pattern: /\/\/\s*TODO.*remove/gi, weight: 0.7, name: 'TODO_REMOVE' },
+      { pattern: /\/\*\s*TODO.*replace.*\*\//gi, weight: 0.7, name: 'TODO_REPLACE' },
+      { pattern: /const\s+(temp|tmp|mock|placeholder)\w*/gi, weight: 0.5, name: 'TEMP_VARIABLES' },
+      { pattern: /let\s+(temp|tmp|mock|placeholder)\w*/gi, weight: 0.5, name: 'TEMP_LET_VARIABLES' },
+      { pattern: /console\.log\(/gi, weight: 0.3, name: 'CONSOLE_LOG' },
+      // Additional patterns from manual audit analysis
+      { pattern: /\/\/\s*FEATURE:\w+/gi, weight: 0.8, name: 'FEATURE_TAG' },
+      { pattern: /\/\/\s*@\w+\s*start/gi, weight: 0.7, name: 'TAGGED_SECTIONS' },
+      { pattern: /\bsandbox\b.*\bmode\b/gi, weight: 0.6, name: 'SANDBOX_MODE' },
+      { pattern: /\bdev\b.*\bonly\b/gi, weight: 0.5, name: 'DEV_ONLY' },
+      { pattern: /\btesting\b.*\bcode\b/gi, weight: 0.4, name: 'TESTING_CODE' }
     ];
 
     let totalSandboxBlocks = 0;
+    const fileMatches: { pattern: string; line: number; content: string; weight: number }[] = [];
     
     // Analyze each line with context validation
     lines.forEach((line, lineIndex) => {
@@ -177,11 +184,43 @@ class RepositoryAuditor {
         return; // Skip this line
       }
 
-      sandboxPatterns.forEach(({ pattern, weight }) => {
+      sandboxPatterns.forEach(({ pattern, weight, name }) => {
         const matches = line.match(pattern) || [];
-        totalSandboxBlocks += matches.length * weight;
+        if (matches.length > 0) {
+          matches.forEach(match => {
+            fileMatches.push({
+              pattern: name,
+              line: lineIndex + 1,
+              content: line.trim(),
+              weight: weight
+            });
+            totalSandboxBlocks += weight;
+          });
+        }
       });
     });
+    
+    // Detailed logging for diagnostic analysis
+    if (fileMatches.length > 0) {
+      console.log(`\n=== FILE ANALYSIS: ${filePath} ===`);
+      console.log(`Total patterns found: ${fileMatches.length}`);
+      console.log(`Weighted sandbox blocks: ${Math.round(totalSandboxBlocks * 10) / 10}`);
+      
+      // Group matches by pattern
+      const patternGroups = fileMatches.reduce((acc, match) => {
+        if (!acc[match.pattern]) acc[match.pattern] = [];
+        acc[match.pattern].push(match);
+        return acc;
+      }, {} as Record<string, typeof fileMatches>);
+      
+      Object.entries(patternGroups).forEach(([patternName, matches]) => {
+        console.log(`\n  Pattern: ${patternName} (${matches.length} matches)`);
+        matches.forEach(match => {
+          console.log(`    Line ${match.line}: ${match.content}`);
+        });
+      });
+      console.log(`=== END FILE ANALYSIS ===\n`);
+    }
     
     // Round to nearest integer and add to total
     this.sandboxBlocks += Math.round(totalSandboxBlocks);
