@@ -167,12 +167,20 @@ class RepositoryAuditor {
       { pattern: /const\s+(temp|tmp|mock|placeholder)\w*/gi, weight: 0.5, name: 'TEMP_VARIABLES' },
       { pattern: /let\s+(temp|tmp|mock|placeholder)\w*/gi, weight: 0.5, name: 'TEMP_LET_VARIABLES' },
       { pattern: /console\.log\(/gi, weight: 0.3, name: 'CONSOLE_LOG' },
-      // Additional patterns from manual audit analysis
+      // Enhanced patterns from manual audit analysis
       { pattern: /\/\/\s*FEATURE:\w+/gi, weight: 0.8, name: 'FEATURE_TAG' },
-      { pattern: /\/\/\s*@\w+\s*start/gi, weight: 0.7, name: 'TAGGED_SECTIONS' },
+      { pattern: /\/\/\s*@\w+[-_]?(start|begin)/gi, weight: 0.7, name: 'TAGGED_SECTIONS' },
+      { pattern: /\/\*\s*@\w+[-_]?(start|begin)/gi, weight: 0.7, name: 'TAGGED_SECTIONS_BLOCK' },
+      { pattern: /\b(sandbox|dev|test)[-_]?(mode|only|code)\b/gi, weight: 0.6, name: 'CONTEXT_PATTERNS' },
+      { pattern: /\/\/\s*TODO:?\s*(remove|replace|temp)/gi, weight: 0.7, name: 'CLEANUP_TODOS' },
+      { pattern: /\/\*\s*TODO:?\s*(remove|replace|temp)/gi, weight: 0.7, name: 'CLEANUP_TODOS_BLOCK' },
       { pattern: /\bsandbox\b.*\bmode\b/gi, weight: 0.6, name: 'SANDBOX_MODE' },
       { pattern: /\bdev\b.*\bonly\b/gi, weight: 0.5, name: 'DEV_ONLY' },
-      { pattern: /\btesting\b.*\bcode\b/gi, weight: 0.4, name: 'TESTING_CODE' }
+      { pattern: /\btesting\b.*\bcode\b/gi, weight: 0.4, name: 'TESTING_CODE' },
+      // Multi-word sandbox references
+      { pattern: /sandbox[-_]?feature/gi, weight: 0.8, name: 'SANDBOX_FEATURE' },
+      { pattern: /self[-_]?test/gi, weight: 0.7, name: 'SELF_TEST_FEATURE' },
+      { pattern: /waitlist[-_]?feature/gi, weight: 0.7, name: 'WAITLIST_FEATURE' }
     ];
 
     let totalSandboxBlocks = 0;
