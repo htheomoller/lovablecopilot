@@ -32,7 +32,9 @@ class RepositoryAuditor {
   private githubToken: string;
   private owner: string;
   private repo: string;
-  private fileContents: Map<string, string> = new Map();
+  private checks: AuditCheck[] = [];
+  private sandboxBlocks = 0;
+  private filesScanned = 0;
 
   constructor(githubToken: string, owner: string, repo: string) {
     this.githubToken = githubToken;
@@ -74,197 +76,220 @@ class RepositoryAuditor {
       const filePaths: string[] = [];
 
       for (const item of contents) {
-        if (item.type === 'file') {
-          // Include all relevant file types
-          const relevantExtensions = ['.ts', '.tsx', '.js', '.jsx', '.json', '.md'];
-          if (relevantExtensions.some(ext => item.name.endsWith(ext))) {
-            filePaths.push(item.path);
-          }
-        } else if (item.type === 'dir') {
-          // Exclude common directories
-          const excludeDirs = ['node_modules', '.git', 'dist', 'build', '.next', 'coverage', '.nyc_output'];
-          if (!excludeDirs.includes(item.name) && !item.name.startsWith('.')) {
-            const subFiles = await this.scanDirectory(item.path);
-            filePaths.push(...subFiles);
-          }
+        if (item.type === 'file' && (item.name.endsWith('.ts') || item.name.endsWith('.tsx') || item.name.endsWith('.js') || item.name.endsWith('.jsx'))) {
+          filePaths.push(item.path);
+        } else if (item.type === 'dir' && !item.name.startsWith('.') && item.name !== 'node_modules') {
+          const subFiles = await this.scanDirectory(item.path);
+          filePaths.push(...subFiles);
         }
       }
 
       return filePaths;
     } catch (error) {
-      console.error(`Error scanning directory ${path}:`, error);
       return [];
     }
   }
 
-  private countSandboxBlocks(): number {
-    let totalBlocks = 0;
-
-    // Simple, proven regex patterns
-    const sandboxPatterns = [
-      /\/\/\s*SANDBOX_START/gi,
-      /\/\*\s*SANDBOX_START\s*\*\//gi,
-      /\/\/\s*DEV_START/gi,
-      /\/\*\s*DEV_START\s*\*\//gi,
-      /\/\/\s*TEMP_START/gi,
-      /\/\*\s*TEMP_START\s*\*\//gi,
-      /\/\/\s*DEBUG_START/gi,
-      /\/\*\s*DEBUG_START\s*\*\//gi
-    ];
-
-    for (const [filePath, content] of this.fileContents.entries()) {
-      // Skip non-code files
-      if (!filePath.match(/\.(ts|tsx|js|jsx)$/)) continue;
-
-      // Count pattern matches
-      for (const pattern of sandboxPatterns) {
-        const matches = content.match(pattern) || [];
-        totalBlocks += matches.length;
-      }
-    }
-
-    return totalBlocks;
-  }
-
-  private generateSecurityChecks(): AuditCheck[] {
-    const checks: AuditCheck[] = [];
+  private analyzeFileContent(content: string, filePath: string): void {
+    this.filesScanned++;
+    const lines = content.split('\n');
 
     // Count sandbox blocks
-    const sandboxBlocks = this.countSandboxBlocks();
-    if (sandboxBlocks > 0) {
-      checks.push({
-        id: 'sandbox_blocks',
-        name: 'Sandbox Block Detection',
-        status: sandboxBlocks > 10 ? 'fail' : 'warning',
-        message: `Found ${sandboxBlocks} sandbox blocks`,
-        details: 'Remove all sandbox blocks before production deployment'
-      });
-    } else {
-      checks.push({
-        id: 'sandbox_blocks',
-        name: 'Sandbox Block Detection',
-        status: 'pass',
-        message: 'No sandbox blocks detected'
-      });
-    }
+    const sandboxStartMatches = content.match(/\/\/\s*SANDBOX_START/gi) || [];
+    const sandboxEndMatches = content.match(/\/\/\s*SANDBOX_END/gi) || [];
+    this.sandboxBlocks += sandboxStartMatches.length;
 
-    // Check for auth implementation  
-    const hasAuthContext = this.fileContents.has('src/contexts/AuthContext.tsx');
-    const hasAuthGate = this.fileContents.has('src/components/AuthGate.tsx');
-    
-    if (hasAuthContext && hasAuthGate) {
-      checks.push({
-        id: 'auth_implementation',
-        name: 'Authentication System',
-        status: 'pass',
-        message: 'Authentication system properly implemented'
-      });
-    } else {
-      checks.push({
-        id: 'auth_implementation', 
-        name: 'Authentication System',
+    if (sandboxStartMatches.length !== sandboxEndMatches.length) {
+      this.checks.push({
+        id: `sandbox_mismatch_${filePath}`,
+        name: 'Sandbox Block Integrity',
         status: 'warning',
-        message: 'Authentication system may be incomplete',
-        details: `Missing: ${!hasAuthContext ? 'AuthContext ' : ''}${!hasAuthGate ? 'AuthGate' : ''}`
+        message: 'Mismatched SANDBOX_START/SANDBOX_END blocks',
+        file_path: filePath
       });
     }
 
-    // Check for potential security issues
-    let hasConsoleLog = false;
-    let hasHardcodedSecrets = false;
+    // Check for hardcoded secrets
+    const secretPatterns = [
+      /sk-[a-zA-Z0-9]{48}/g, // OpenAI API keys
+      /xoxb-[0-9]{11}-[0-9]{11}-[a-zA-Z0-9]{24}/g, // Slack tokens
+      /ghp_[a-zA-Z0-9]{36}/g, // GitHub personal access tokens
+      /AKIA[0-9A-Z]{16}/g, // AWS access keys
+    ];
 
-    for (const [filePath, content] of this.fileContents.entries()) {
-      if (!filePath.match(/\.(ts|tsx|js|jsx)$/)) continue;
-
-      // Check for console.log statements
-      if (content.includes('console.log') && !hasConsoleLog) {
-        hasConsoleLog = true;
+    secretPatterns.forEach((pattern, index) => {
+      const matches = content.match(pattern);
+      if (matches) {
+        matches.forEach(match => {
+          const lineNumber = lines.findIndex(line => line.includes(match)) + 1;
+          this.checks.push({
+            id: `secret_exposed_${filePath}_${index}`,
+            name: 'Secret Exposure',
+            status: 'fail',
+            message: 'Potential exposed secret detected',
+            details: `Found pattern: ${match.substring(0, 8)}...`,
+            file_path: filePath,
+            line_number: lineNumber
+          });
+        });
       }
+    });
 
-      // Check for potential hardcoded secrets
-      const secretPatterns = [
-        /api[_-]?key["\s]*[:=]["\s]*[a-zA-Z0-9]{10,}/gi,
-        /secret["\s]*[:=]["\s]*[a-zA-Z0-9]{10,}/gi,
-        /token["\s]*[:=]["\s]*[a-zA-Z0-9]{10,}/gi
-      ];
-
-      for (const pattern of secretPatterns) {
-        if (pattern.test(content) && !hasHardcodedSecrets) {
-          hasHardcodedSecrets = true;
-          break;
+    // Check for development routes
+    if (filePath.includes('routes') || filePath.includes('router')) {
+      const devRoutes = ['/health', '/self-test', '/dev/', '/debug/'];
+      devRoutes.forEach(route => {
+        if (content.includes(route)) {
+          const lineNumber = lines.findIndex(line => line.includes(route)) + 1;
+          this.checks.push({
+            id: `dev_route_${filePath}_${route}`,
+            name: 'Development Route Detection',
+            status: 'warning',
+            message: 'Development route found',
+            details: `Route: ${route}`,
+            file_path: filePath,
+            line_number: lineNumber
+          });
         }
+      });
+    }
+
+    // Check for proper TypeScript setup
+    if (filePath.endsWith('.js') || filePath.endsWith('.jsx')) {
+      this.checks.push({
+        id: `typescript_missing_${filePath}`,
+        name: 'TypeScript Usage',
+        status: 'warning',
+        message: 'JavaScript file found in TypeScript project',
+        file_path: filePath
+      });
+    }
+  }
+
+  private async checkConfiguration(): Promise<void> {
+    // Check for src/config/public.ts
+    const publicConfig = await this.getFileContent('src/config/public.ts');
+    if (publicConfig) {
+      this.checks.push({
+        id: 'public_config_exists',
+        name: 'Public Configuration',
+        status: 'pass',
+        message: 'Public configuration file found'
+      });
+
+      // Check for proper environment detection
+      if (publicConfig.includes('getEnv') && publicConfig.includes('dev') && publicConfig.includes('prod')) {
+        this.checks.push({
+          id: 'environment_separation',
+          name: 'Environment Separation',
+          status: 'pass',
+          message: 'Environment separation implemented'
+        });
+      } else {
+        this.checks.push({
+          id: 'environment_separation',
+          name: 'Environment Separation',
+          status: 'warning',
+          message: 'Environment separation not properly configured'
+        });
+      }
+    } else {
+      this.checks.push({
+        id: 'public_config_exists',
+        name: 'Public Configuration',
+        status: 'fail',
+        message: 'Missing src/config/public.ts file'
+      });
+    }
+
+    // Check for Supabase integration
+    const supabaseClient = await this.getFileContent('src/integrations/supabase/client.ts');
+    if (supabaseClient) {
+      this.checks.push({
+        id: 'supabase_integration',
+        name: 'Supabase Integration',
+        status: 'pass',
+        message: 'Supabase client configuration found'
+      });
+    } else {
+      this.checks.push({
+        id: 'supabase_integration',
+        name: 'Supabase Integration',
+        status: 'warning',
+        message: 'Supabase integration not found'
+      });
+    }
+
+    // Check for package.json
+    const packageJson = await this.getFileContent('package.json');
+    if (packageJson) {
+      const pkg = JSON.parse(packageJson);
+      const lovableDeps = ['@supabase/supabase-js', 'vite', 'react', 'tailwindcss'];
+      const hasLovableDeps = lovableDeps.some(dep => 
+        pkg.dependencies?.[dep] || pkg.devDependencies?.[dep]
+      );
+
+      if (hasLovableDeps) {
+        this.checks.push({
+          id: 'lovable_project',
+          name: 'Lovable Project Structure',
+          status: 'pass',
+          message: 'Lovable project dependencies detected'
+        });
       }
     }
+  }
 
-    if (hasConsoleLog) {
-      checks.push({
-        id: 'console_statements',
-        name: 'Console Statements',
-        status: 'warning',
-        message: 'Console.log statements found',
-        details: 'Remove console.log statements before production'
-      });
+  private generateRecommendations(): string[] {
+    const recommendations: string[] = [];
+
+    if (this.sandboxBlocks > 0) {
+      recommendations.push(`Remove ${this.sandboxBlocks} sandbox blocks before production deployment`);
     }
 
-    if (hasHardcodedSecrets) {
-      checks.push({
-        id: 'hardcoded_secrets',
-        name: 'Hardcoded Secrets',
-        status: 'fail',
-        message: 'Potential hardcoded secrets detected',
-        details: 'Move secrets to environment variables'
-      });
+    const failedChecks = this.checks.filter(c => c.status === 'fail');
+    if (failedChecks.length > 0) {
+      recommendations.push(`Address ${failedChecks.length} critical security issues`);
     }
 
-    return checks;
+    const warningChecks = this.checks.filter(c => c.status === 'warning');
+    if (warningChecks.length > 0) {
+      recommendations.push(`Review ${warningChecks.length} warning items for production readiness`);
+    }
+
+    const devRoutes = this.checks.filter(c => c.name === 'Development Route Detection');
+    if (devRoutes.length > 0) {
+      recommendations.push('Configure development routes to be disabled in production');
+    }
+
+    return recommendations;
   }
 
   async performAudit(): Promise<AuditReport> {
     console.log(`Starting audit for ${this.owner}/${this.repo}`);
 
-    // Scan all files recursively
-    const filePaths = await this.scanDirectory();
-    console.log(`Found ${filePaths.length} files to analyze`);
+    // Check configuration first
+    await this.checkConfiguration();
+
+    // Scan all TypeScript/JavaScript files
+    const filePaths = await this.scanDirectory('src');
     
-    // Load file contents
     for (const filePath of filePaths) {
       const content = await this.getFileContent(filePath);
       if (content) {
-        this.fileContents.set(filePath, content);
+        this.analyzeFileContent(content, filePath);
       }
     }
 
-    console.log(`Successfully loaded ${this.fileContents.size} files`);
-
-    // Generate security checks
-    const checks = this.generateSecurityChecks();
+    const passed = this.checks.filter(c => c.status === 'pass').length;
+    const warnings = this.checks.filter(c => c.status === 'warning').length;
+    const failed = this.checks.filter(c => c.status === 'fail').length;
     
-    // Calculate summary
-    const passed = checks.filter(c => c.status === 'pass').length;
-    const warnings = checks.filter(c => c.status === 'warning').length;
-    const failed = checks.filter(c => c.status === 'fail').length;
-    const sandboxBlocks = this.countSandboxBlocks();
-    
-    // Calculate score
-    const totalChecks = checks.length;
-    const score = totalChecks > 0 ? Math.round(((passed + (warnings * 0.5)) / totalChecks) * 100) : 100;
+    // Calculate overall score (0-100)
+    const totalChecks = this.checks.length;
+    const score = totalChecks > 0 ? Math.round(((passed + (warnings * 0.5)) / totalChecks) * 100) : 0;
 
-    // Generate recommendations
-    const recommendations: string[] = [];
-    if (sandboxBlocks > 0) {
-      recommendations.push(`Remove ${sandboxBlocks} sandbox blocks before production`);
-    }
-    if (failed > 0) {
-      recommendations.push(`Address ${failed} critical security issues`);
-    }
-    if (warnings > 0) {
-      recommendations.push(`Review ${warnings} warnings for production readiness`);
-    }
-    if (recommendations.length === 0) {
-      recommendations.push('Repository appears production-ready');
-    }
-
-    const auditReport: AuditReport = {
+    return {
       repository_name: `${this.owner}/${this.repo}`,
       repository_url: `https://github.com/${this.owner}/${this.repo}`,
       scan_timestamp: new Date().toISOString(),
@@ -274,16 +299,12 @@ class RepositoryAuditor {
         passed,
         warnings,
         failed,
-        sandbox_blocks: sandboxBlocks,
-        files_scanned: this.fileContents.size
+        sandbox_blocks: this.sandboxBlocks,
+        files_scanned: this.filesScanned
       },
-      checks,
-      recommendations
+      checks: this.checks,
+      recommendations: this.generateRecommendations()
     };
-
-    console.log(`Audit completed: ${this.fileContents.size} files scanned, ${sandboxBlocks} sandbox blocks found, score: ${score}`);
-
-    return auditReport;
   }
 }
 
