@@ -1,91 +1,34 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { corsHeaders } from '../_shared/cors.ts'
 
-// Calmer-proven audit system types
-interface FeatureManifest {
-  slug: string;
+interface AuditCheck {
+  id: string;
   name: string;
-  description: string;
-  flags: string[];
-  routes: string[];
-  files: string[];
-  edge_functions: string[];
-  db: {
-    tables: string[];
-    policies: string[];
-  };
-  env: string[];
-  cleanup_ready_when: string[];
-  notes: string[];
-}
-
-interface ScanResult {
-  feature: string;
-  listed_files_found: string[];
-  listed_files_missing: string[];
-  extra_feature_files: string[];
-  routes_found: string[];
-  routes_missing: string[];
-  edge_functions_found: string[];
-  edge_functions_missing: string[];
-  sandbox_blocks: number;
+  status: 'pass' | 'fail' | 'warning';
+  message: string;
+  details?: string;
+  file_path?: string;
+  line_number?: number;
 }
 
 interface AuditReport {
-  timestamp: string;
-  features: ScanResult[];
-  usage: any[];
+  repository_name: string;
+  repository_url: string;
+  scan_timestamp: string;
+  overall_score: number;
   summary: {
-    total_features: number;
-    files_with_issues: number;
-    sandbox_blocks_total: number;
+    total_checks: number;
+    passed: number;
+    warnings: number;
+    failed: number;
+    sandbox_blocks: number;
+    files_scanned: number;
   };
+  checks: AuditCheck[];
+  recommendations: string[];
 }
 
-// Feature manifests for Lovable projects
-const FEATURE_MANIFESTS: FeatureManifest[] = [
-  {
-    slug: 'auth',
-    name: 'Authentication',
-    description: 'User authentication and authorization system',
-    flags: ['auth', 'user-management'],
-    routes: ['/auth', '/login', '/signup', '/logout'],
-    files: ['src/contexts/AuthContext.tsx', 'src/components/AuthGate.tsx', 'src/pages/Auth.tsx'],
-    edge_functions: ['auth-callback'],
-    db: { tables: ['profiles'], policies: ['Users can view own profile'] },
-    env: ['SUPABASE_URL', 'SUPABASE_ANON_KEY'],
-    cleanup_ready_when: ['auth_system_stable'],
-    notes: ['Core authentication system using Supabase Auth']
-  },
-  {
-    slug: 'audit',
-    name: 'Repository Audit System',
-    description: 'Code repository auditing and analysis',
-    flags: ['audit', 'analysis', 'security'],
-    routes: ['/audit-results'],
-    files: ['src/pages/AuditResults.tsx', 'src/components/AuditResults.tsx', 'src/components/RepositoryCard.tsx'],
-    edge_functions: ['repository-audit'],
-    db: { tables: ['repository_audits'], policies: ['Users can view their own repository audits'] },
-    env: [],
-    cleanup_ready_when: ['audit_system_stable'],
-    notes: ['Repository analysis and security scanning system']
-  },
-  {
-    slug: 'github',
-    name: 'GitHub Integration',
-    description: 'GitHub repository connection and management',
-    flags: ['github', 'integration', 'vcs'],
-    routes: ['/connect-repo'],
-    files: ['src/pages/ConnectRepo.tsx', 'src/components/GitHubConnectButton.tsx', 'src/lib/github.ts'],
-    edge_functions: ['github-oauth'],
-    db: { tables: ['profiles'], policies: ['Users can update own GitHub data'] },
-    env: ['GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET'],
-    cleanup_ready_when: ['github_integration_stable'],
-    notes: ['GitHub OAuth and repository management']
-  }
-];
-
-class EnhancedRepositoryAuditor {
+class RepositoryAuditor {
   private githubToken: string;
   private owner: string;
   private repo: string;
@@ -132,26 +75,32 @@ class EnhancedRepositoryAuditor {
 
       for (const item of contents) {
         if (item.type === 'file') {
-          const relevantExtensions = ['.ts', '.tsx', '.js', '.jsx', '.json'];
+          // Include all relevant file types
+          const relevantExtensions = ['.ts', '.tsx', '.js', '.jsx', '.json', '.md'];
           if (relevantExtensions.some(ext => item.name.endsWith(ext))) {
             filePaths.push(item.path);
           }
-        } else if (item.type === 'dir' && !item.name.startsWith('.') && item.name !== 'node_modules') {
-          const subFiles = await this.scanDirectory(item.path);
-          filePaths.push(...subFiles);
+        } else if (item.type === 'dir') {
+          // Exclude common directories
+          const excludeDirs = ['node_modules', '.git', 'dist', 'build', '.next', 'coverage', '.nyc_output'];
+          if (!excludeDirs.includes(item.name) && !item.name.startsWith('.')) {
+            const subFiles = await this.scanDirectory(item.path);
+            filePaths.push(...subFiles);
+          }
         }
       }
 
       return filePaths;
     } catch (error) {
+      console.error(`Error scanning directory ${path}:`, error);
       return [];
     }
   }
 
-  // Calmer-proven sandbox block counting with 99% accuracy
-  private countSandboxBlocks(filePaths: string[]): number {
+  private countSandboxBlocks(): number {
     let totalBlocks = 0;
 
+    // Simple, proven regex patterns
     const sandboxPatterns = [
       /\/\/\s*SANDBOX_START/gi,
       /\/\*\s*SANDBOX_START\s*\*\//gi,
@@ -160,279 +109,124 @@ class EnhancedRepositoryAuditor {
       /\/\/\s*TEMP_START/gi,
       /\/\*\s*TEMP_START\s*\*\//gi,
       /\/\/\s*DEBUG_START/gi,
-      /\/\*\s*DEBUG_START\s*\*\//gi,
-      /\/\/\s*@lovable\s*start/gi,
-      /\/\*\s*@lovable\s*start\s*\*\//gi,
-      /\/\/\s*AI_GENERATED_START/gi,
-      /\/\*\s*AI_GENERATED_START\s*\*\//gi,
-      /\/\/\s*PLACEHOLDER_START/gi,
-      /\/\*\s*PLACEHOLDER_START\s*\*\//gi
+      /\/\*\s*DEBUG_START\s*\*\//gi
     ];
 
-    for (const filePath of filePaths) {
-      const content = this.fileContents.get(filePath);
-      if (!content) continue;
+    for (const [filePath, content] of this.fileContents.entries()) {
+      // Skip non-code files
+      if (!filePath.match(/\.(ts|tsx|js|jsx)$/)) continue;
 
-      // Count all sandbox pattern occurrences
+      // Count pattern matches
       for (const pattern of sandboxPatterns) {
         const matches = content.match(pattern) || [];
         totalBlocks += matches.length;
-      }
-
-      // Additional heuristics for accuracy
-      const lines = content.split('\n');
-      let inPotentialSandbox = false;
-      let sandboxDepth = 0;
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        
-        // Look for typical sandbox patterns
-        if (trimmed.includes('// TODO:') || trimmed.includes('/* TODO:')) {
-          if (trimmed.includes('remove') || trimmed.includes('replace') || trimmed.includes('implement')) {
-            sandboxDepth++;
-            if (!inPotentialSandbox) {
-              inPotentialSandbox = true;
-            }
-          }
-        }
-        
-        // Look for temporary variable patterns
-        if (trimmed.match(/const\s+(temp|tmp|placeholder|mock)\w*/i) ||
-            trimmed.match(/let\s+(temp|tmp|placeholder|mock)\w*/i)) {
-          sandboxDepth++;
-        }
-        
-        // Look for console.log patterns (often left in sandbox code)
-        if (trimmed.includes('console.log') && !trimmed.includes('// keep')) {
-          sandboxDepth++;
-        }
-        
-        // Reset on function/class boundaries
-        if (trimmed.match(/^(function|class|const\s+\w+\s*=\s*\()/)) {
-          if (sandboxDepth > 2 && inPotentialSandbox) {
-            totalBlocks++;
-          }
-          sandboxDepth = 0;
-          inPotentialSandbox = false;
-        }
-      }
-      
-      // Final check for remaining sandbox indicators
-      if (sandboxDepth > 2 && inPotentialSandbox) {
-        totalBlocks++;
       }
     }
 
     return totalBlocks;
   }
 
-  // Scan feature implementation against manifest
-  private scanFeature(manifest: FeatureManifest): ScanResult {
-    const result: ScanResult = {
-      feature: manifest.slug,
-      listed_files_found: [],
-      listed_files_missing: [],
-      extra_feature_files: [],
-      routes_found: [],
-      routes_missing: [],
-      edge_functions_found: [],
-      edge_functions_missing: [],
-      sandbox_blocks: 0
-    };
+  private generateSecurityChecks(): AuditCheck[] {
+    const checks: AuditCheck[] = [];
 
-    // Check listed files
-    for (const expectedFile of manifest.files) {
-      if (this.fileContents.has(expectedFile)) {
-        result.listed_files_found.push(expectedFile);
-      } else {
-        result.listed_files_missing.push(expectedFile);
-      }
+    // Count sandbox blocks
+    const sandboxBlocks = this.countSandboxBlocks();
+    if (sandboxBlocks > 0) {
+      checks.push({
+        id: 'sandbox_blocks',
+        name: 'Sandbox Block Detection',
+        status: sandboxBlocks > 10 ? 'fail' : 'warning',
+        message: `Found ${sandboxBlocks} sandbox blocks`,
+        details: 'Remove all sandbox blocks before production deployment'
+      });
+    } else {
+      checks.push({
+        id: 'sandbox_blocks',
+        name: 'Sandbox Block Detection',
+        status: 'pass',
+        message: 'No sandbox blocks detected'
+      });
     }
 
-    // Find extra files mentioning this feature
-    const featureTaggedFiles = this.findFeatureTaggedFiles();
-    const extraFiles = featureTaggedFiles[manifest.slug] || [];
-    result.extra_feature_files = extraFiles.filter(file => !manifest.files.includes(file));
-
-    // Check routes in file contents
-    const allFilePaths = Array.from(this.fileContents.keys());
-    const routeFiles = allFilePaths.filter(path => 
-      path.includes('routes') || path.includes('router') || path.includes('App.tsx')
-    );
-
-    for (const routeFile of routeFiles) {
-      const content = this.fileContents.get(routeFile) || '';
-      
-      for (const expectedRoute of manifest.routes) {
-        if (content.includes(expectedRoute)) {
-          if (!result.routes_found.includes(expectedRoute)) {
-            result.routes_found.push(expectedRoute);
-          }
-        } else if (!result.routes_missing.includes(expectedRoute)) {
-          result.routes_missing.push(expectedRoute);
-        }
-      }
-    }
-
-    // Check edge functions
-    const edgeFunctionFiles = allFilePaths.filter(path => path.startsWith('supabase/functions/'));
+    // Check for auth implementation  
+    const hasAuthContext = this.fileContents.has('src/contexts/AuthContext.tsx');
+    const hasAuthGate = this.fileContents.has('src/components/AuthGate.tsx');
     
-    for (const expectedFunction of manifest.edge_functions) {
-      const functionPath = `supabase/functions/${expectedFunction}/index.ts`;
-      if (edgeFunctionFiles.includes(functionPath)) {
-        result.edge_functions_found.push(expectedFunction);
-      } else {
-        result.edge_functions_missing.push(expectedFunction);
-      }
+    if (hasAuthContext && hasAuthGate) {
+      checks.push({
+        id: 'auth_implementation',
+        name: 'Authentication System',
+        status: 'pass',
+        message: 'Authentication system properly implemented'
+      });
+    } else {
+      checks.push({
+        id: 'auth_implementation', 
+        name: 'Authentication System',
+        status: 'warning',
+        message: 'Authentication system may be incomplete',
+        details: `Missing: ${!hasAuthContext ? 'AuthContext ' : ''}${!hasAuthGate ? 'AuthGate' : ''}`
+      });
     }
 
-    // Count sandbox blocks in related files
-    const relatedFiles = [...result.listed_files_found, ...result.extra_feature_files];
-    result.sandbox_blocks = this.countSandboxBlocks(relatedFiles);
-
-    return result;
-  }
-
-  private findFeatureTaggedFiles(): Record<string, string[]> {
-    const taggedFiles: Record<string, string[]> = {};
+    // Check for potential security issues
+    let hasConsoleLog = false;
+    let hasHardcodedSecrets = false;
 
     for (const [filePath, content] of this.fileContents.entries()) {
-      // Look for feature tags in comments
-      const featureTagPatterns = [
-        /\/\/\s*@feature[:\s]+(\w+)/gi,
-        /\/\*\s*@feature[:\s]+(\w+)\s*\*\//gi,
-        /\/\/\s*feature[:\s]+(\w+)/gi
+      if (!filePath.match(/\.(ts|tsx|js|jsx)$/)) continue;
+
+      // Check for console.log statements
+      if (content.includes('console.log') && !hasConsoleLog) {
+        hasConsoleLog = true;
+      }
+
+      // Check for potential hardcoded secrets
+      const secretPatterns = [
+        /api[_-]?key["\s]*[:=]["\s]*[a-zA-Z0-9]{10,}/gi,
+        /secret["\s]*[:=]["\s]*[a-zA-Z0-9]{10,}/gi,
+        /token["\s]*[:=]["\s]*[a-zA-Z0-9]{10,}/gi
       ];
 
-      for (const pattern of featureTagPatterns) {
-        let match;
-        while ((match = pattern.exec(content)) !== null) {
-          const featureName = match[1].toLowerCase();
-          if (!taggedFiles[featureName]) {
-            taggedFiles[featureName] = [];
-          }
-          if (!taggedFiles[featureName].includes(filePath)) {
-            taggedFiles[featureName].push(filePath);
-          }
-        }
-      }
-
-      // Infer features from file paths
-      const pathFeatures = this.inferFeatureFromPath(filePath);
-      for (const feature of pathFeatures) {
-        if (!taggedFiles[feature]) {
-          taggedFiles[feature] = [];
-        }
-        if (!taggedFiles[feature].includes(filePath)) {
-          taggedFiles[feature].push(filePath);
+      for (const pattern of secretPatterns) {
+        if (pattern.test(content) && !hasHardcodedSecrets) {
+          hasHardcodedSecrets = true;
+          break;
         }
       }
     }
 
-    return taggedFiles;
+    if (hasConsoleLog) {
+      checks.push({
+        id: 'console_statements',
+        name: 'Console Statements',
+        status: 'warning',
+        message: 'Console.log statements found',
+        details: 'Remove console.log statements before production'
+      });
+    }
+
+    if (hasHardcodedSecrets) {
+      checks.push({
+        id: 'hardcoded_secrets',
+        name: 'Hardcoded Secrets',
+        status: 'fail',
+        message: 'Potential hardcoded secrets detected',
+        details: 'Move secrets to environment variables'
+      });
+    }
+
+    return checks;
   }
 
-  private inferFeatureFromPath(filePath: string): string[] {
-    const features: string[] = [];
-    const pathSegments = filePath.split('/');
-    
-    for (const segment of pathSegments) {
-      if (segment.match(/^(auth|user|profile|dashboard|settings|admin|audit|report|chat|integration)/i)) {
-        features.push(segment.toLowerCase());
-      }
-      
-      if (segment.endsWith('.tsx') || segment.endsWith('.ts')) {
-        const componentName = segment.replace(/\.(tsx?|jsx?)$/, '');
-        if (componentName.match(/^[A-Z]\w*$/)) {
-          const featureName = componentName.toLowerCase();
-          if (featureName !== 'index' && featureName !== 'app') {
-            features.push(featureName);
-          }
-        }
-      }
-    }
-    
-    return features;
-  }
+  async performAudit(): Promise<AuditReport> {
+    console.log(`Starting audit for ${this.owner}/${this.repo}`);
 
-  private convertToLegacyReport(report: AuditReport, repositoryName: string, repositoryUrl: string): any {
-    const checks = [];
-    let totalFiles = 0;
-
-    // Generate checks from feature scan results
-    for (const feature of report.features) {
-      totalFiles += feature.listed_files_found.length + feature.extra_feature_files.length;
-
-      if (feature.listed_files_missing.length > 0) {
-        checks.push({
-          id: `${feature.feature}_files_missing`,
-          name: `${feature.feature} - File Implementation`,
-          status: 'warning',
-          message: `${feature.listed_files_missing.length} expected files not found`,
-          details: `Missing: ${feature.listed_files_missing.join(', ')}`
-        });
-      } else if (feature.listed_files_found.length > 0) {
-        checks.push({
-          id: `${feature.feature}_files_complete`,
-          name: `${feature.feature} - File Implementation`,
-          status: 'pass',
-          message: 'All expected files found'
-        });
-      }
-
-      if (feature.sandbox_blocks > 0) {
-        checks.push({
-          id: `${feature.feature}_sandbox_blocks`,
-          name: `${feature.feature} - Sandbox Cleanup`,
-          status: feature.sandbox_blocks > 5 ? 'fail' : 'warning',
-          message: `${feature.sandbox_blocks} sandbox blocks detected`,
-          details: 'Remove sandbox blocks before production deployment'
-        });
-      }
-    }
-
-    const passed = checks.filter(c => c.status === 'pass').length;
-    const warnings = checks.filter(c => c.status === 'warning').length;
-    const failed = checks.filter(c => c.status === 'fail').length;
-    const totalChecks = checks.length;
-    const score = totalChecks > 0 ? Math.round(((passed + (warnings * 0.5)) / totalChecks) * 100) : 100;
-
-    const recommendations = [];
-    if (report.summary.sandbox_blocks_total > 0) {
-      recommendations.push(`Remove ${report.summary.sandbox_blocks_total} sandbox blocks before production`);
-    }
-    if (failed > 0) {
-      recommendations.push(`Address ${failed} critical issues`);
-    }
-    if (warnings > 0) {
-      recommendations.push(`Review ${warnings} warnings for production readiness`);
-    }
-
-    return {
-      repository_name: repositoryName,
-      repository_url: repositoryUrl,
-      scan_timestamp: report.timestamp,
-      overall_score: score,
-      summary: {
-        total_checks: totalChecks,
-        passed,
-        warnings,
-        failed,
-        sandbox_blocks: report.summary.sandbox_blocks_total,
-        files_scanned: totalFiles
-      },
-      checks,
-      recommendations
-    };
-  }
-
-  async performAudit(): Promise<any> {
-    console.log(`Starting enhanced audit for ${this.owner}/${this.repo}`);
-
-    // Scan all relevant files and load their contents
+    // Scan all files recursively
     const filePaths = await this.scanDirectory();
+    console.log(`Found ${filePaths.length} files to analyze`);
     
+    // Load file contents
     for (const filePath of filePaths) {
       const content = await this.getFileContent(filePath);
       if (content) {
@@ -440,62 +234,56 @@ class EnhancedRepositoryAuditor {
       }
     }
 
-    console.log(`Loaded ${this.fileContents.size} files for analysis`);
+    console.log(`Successfully loaded ${this.fileContents.size} files`);
 
-    // Perform feature-based scanning
-    const features: ScanResult[] = [];
-    for (const manifest of FEATURE_MANIFESTS) {
-      const scanResult = this.scanFeature(manifest);
-      features.push(scanResult);
+    // Generate security checks
+    const checks = this.generateSecurityChecks();
+    
+    // Calculate summary
+    const passed = checks.filter(c => c.status === 'pass').length;
+    const warnings = checks.filter(c => c.status === 'warning').length;
+    const failed = checks.filter(c => c.status === 'fail').length;
+    const sandboxBlocks = this.countSandboxBlocks();
+    
+    // Calculate score
+    const totalChecks = checks.length;
+    const score = totalChecks > 0 ? Math.round(((passed + (warnings * 0.5)) / totalChecks) * 100) : 100;
+
+    // Generate recommendations
+    const recommendations: string[] = [];
+    if (sandboxBlocks > 0) {
+      recommendations.push(`Remove ${sandboxBlocks} sandbox blocks before production`);
     }
-
-    // Calculate summary statistics
-    const totalSandboxBlocks = features.reduce((sum, f) => sum + f.sandbox_blocks, 0);
-    const filesWithIssues = this.countFilesWithIssues(features);
+    if (failed > 0) {
+      recommendations.push(`Address ${failed} critical security issues`);
+    }
+    if (warnings > 0) {
+      recommendations.push(`Review ${warnings} warnings for production readiness`);
+    }
+    if (recommendations.length === 0) {
+      recommendations.push('Repository appears production-ready');
+    }
 
     const auditReport: AuditReport = {
-      timestamp: new Date().toISOString(),
-      features,
-      usage: [], // Placeholder for usage stats
+      repository_name: `${this.owner}/${this.repo}`,
+      repository_url: `https://github.com/${this.owner}/${this.repo}`,
+      scan_timestamp: new Date().toISOString(),
+      overall_score: score,
       summary: {
-        total_features: features.length,
-        files_with_issues: filesWithIssues,
-        sandbox_blocks_total: totalSandboxBlocks
-      }
+        total_checks: totalChecks,
+        passed,
+        warnings,
+        failed,
+        sandbox_blocks: sandboxBlocks,
+        files_scanned: this.fileContents.size
+      },
+      checks,
+      recommendations
     };
 
-    console.log(`Enhanced audit completed: ${totalSandboxBlocks} sandbox blocks found across ${features.length} features`);
+    console.log(`Audit completed: ${this.fileContents.size} files scanned, ${sandboxBlocks} sandbox blocks found, score: ${score}`);
 
-    // Convert to legacy format for backward compatibility
-    return this.convertToLegacyReport(
-      auditReport, 
-      `${this.owner}/${this.repo}`, 
-      `https://github.com/${this.owner}/${this.repo}`
-    );
-  }
-
-  private countFilesWithIssues(features: ScanResult[]): number {
-    const filesWithIssues = new Set<string>();
-    
-    for (const feature of features) {
-      // Files with missing implementations
-      feature.listed_files_missing.forEach(file => filesWithIssues.add(file));
-      
-      // Files with sandbox blocks
-      feature.listed_files_found.forEach(file => {
-        if (this.countSandboxBlocks([file]) > 0) {
-          filesWithIssues.add(file);
-        }
-      });
-      
-      feature.extra_feature_files.forEach(file => {
-        if (this.countSandboxBlocks([file]) > 0) {
-          filesWithIssues.add(file);
-        }
-      });
-    }
-    
-    return filesWithIssues.size;
+    return auditReport;
   }
 }
 
@@ -527,7 +315,7 @@ Deno.serve(async (req) => {
     const [, owner, repo] = urlMatch;
     const repoName = repo.replace('.git', '');
 
-    console.log(`Starting enhanced audit for ${owner}/${repoName}`);
+    console.log(`Starting audit for ${owner}/${repoName}`);
 
     // Create Supabase client
     const supabase = createClient(
@@ -546,8 +334,8 @@ Deno.serve(async (req) => {
         last_audit_date: new Date().toISOString()
       });
 
-    // Perform the enhanced audit
-    const auditor = new EnhancedRepositoryAuditor(github_token, owner, repoName);
+    // Perform the audit
+    const auditor = new RepositoryAuditor(github_token, owner, repoName);
     const auditReport = await auditor.performAudit();
 
     // Save audit results
@@ -570,7 +358,7 @@ Deno.serve(async (req) => {
       );
     }
 
-    console.log(`Enhanced audit completed for ${owner}/${repoName}, score: ${auditReport.overall_score}`);
+    console.log(`Audit completed for ${owner}/${repoName}, score: ${auditReport.overall_score}`);
 
     return new Response(
       JSON.stringify({ audit_report: auditReport }),
@@ -578,7 +366,7 @@ Deno.serve(async (req) => {
     );
 
   } catch (error) {
-    console.error('Enhanced audit error:', error);
+    console.error('Audit error:', error);
     
     return new Response(
       JSON.stringify({ error: error.message || 'Internal server error' }),
