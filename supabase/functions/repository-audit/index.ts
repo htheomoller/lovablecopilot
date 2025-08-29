@@ -94,38 +94,97 @@ class RepositoryAuditor {
     }
   }
 
+  private isLegitimateCode(line: string, filePath: string, lineIndex: number, lines: string[]): boolean {
+    // Exclude documentation and example files
+    if (filePath.includes('/docs/') || filePath.includes('/examples/') || 
+        filePath.includes('/test/') || filePath.endsWith('.md') ||
+        filePath.includes('README') || filePath.includes('CHANGELOG')) {
+      return true;
+    }
+
+    // Skip import/export statements
+    if (line.includes('import') || line.includes('export')) {
+      return true;
+    }
+
+    // Check if inside JSDoc comment block
+    let inJSDoc = false;
+    for (let i = Math.max(0, lineIndex - 10); i <= lineIndex; i++) {
+      if (lines[i]?.includes('/**')) inJSDoc = true;
+      if (lines[i]?.includes('*/')) inJSDoc = false;
+    }
+    if (inJSDoc) return true;
+
+    // Check if inside markdown code block
+    let inCodeBlock = false;
+    for (let i = Math.max(0, lineIndex - 20); i <= lineIndex; i++) {
+      if (lines[i]?.includes('```')) inCodeBlock = !inCodeBlock;
+    }
+    if (inCodeBlock) return true;
+
+    // Allow legitimate variable names
+    if (line.includes('temperature') || line.includes('template') || 
+        line.includes('temporary') || line.includes('attempt')) {
+      return true;
+    }
+
+    // Allow console.log in error handling
+    if (line.includes('console.log') && 
+        (line.includes('error') || line.includes('catch') || line.includes('warn'))) {
+      return true;
+    }
+
+    // Skip TODO comments that are documentation
+    if (line.includes('TODO') && 
+        (line.includes('documentation') || line.includes('implement') || 
+         line.includes('feature') || line.includes('add'))) {
+      return true;
+    }
+
+    return false;
+  }
+
   private analyzeFileContent(content: string, filePath: string): void {
     this.filesScanned++;
     const lines = content.split('\n');
 
-    // Enhanced sandbox block detection patterns
+    // Enhanced sandbox block detection patterns with context validation
     const sandboxPatterns = [
-      /\/\/\s*SANDBOX_START/gi,
-      /\/\*\s*SANDBOX_START\s*\*\//gi,
-      /\/\/\s*TEMP_START/gi,
-      /\/\*\s*TEMP_START\s*\*\//gi,
-      /\/\/\s*DEBUG_START/gi,
-      /\/\*\s*DEBUG_START\s*\*\//gi,
-      /\/\/\s*DEV_START/gi,
-      /\/\*\s*DEV_START\s*\*\//gi,
-      /\/\/\s*@sandbox/gi,
-      /\/\*\s*@sandbox\s*\*\//gi,
-      /\/\/\s*@dev/gi,
-      /\/\*\s*@dev\s*\*\//gi,
-      /\/\/\s*TODO.*remove/gi,
-      /\/\*\s*TODO.*replace.*\*\//gi,
-      /const\s+(temp|tmp|mock|placeholder)\w*/gi,
-      /let\s+(temp|tmp|mock|placeholder)\w*/gi,
-      /console\.log\(/gi
+      { pattern: /\/\/\s*SANDBOX_START/gi, weight: 1 },
+      { pattern: /\/\*\s*SANDBOX_START\s*\*\//gi, weight: 1 },
+      { pattern: /\/\/\s*TEMP_START/gi, weight: 1 },
+      { pattern: /\/\*\s*TEMP_START\s*\*\//gi, weight: 1 },
+      { pattern: /\/\/\s*DEBUG_START/gi, weight: 1 },
+      { pattern: /\/\*\s*DEBUG_START\s*\*\//gi, weight: 1 },
+      { pattern: /\/\/\s*DEV_START/gi, weight: 1 },
+      { pattern: /\/\*\s*DEV_START\s*\*\//gi, weight: 1 },
+      { pattern: /\/\/\s*@sandbox/gi, weight: 0.8 },
+      { pattern: /\/\*\s*@sandbox\s*\*\//gi, weight: 0.8 },
+      { pattern: /\/\/\s*@dev/gi, weight: 0.6 },
+      { pattern: /\/\*\s*@dev\s*\*\//gi, weight: 0.6 },
+      { pattern: /\/\/\s*TODO.*remove/gi, weight: 0.7 },
+      { pattern: /\/\*\s*TODO.*replace.*\*\//gi, weight: 0.7 },
+      { pattern: /const\s+(temp|tmp|mock|placeholder)\w*/gi, weight: 0.5 },
+      { pattern: /let\s+(temp|tmp|mock|placeholder)\w*/gi, weight: 0.5 },
+      { pattern: /console\.log\(/gi, weight: 0.3 }
     ];
 
     let totalSandboxBlocks = 0;
-    sandboxPatterns.forEach(pattern => {
-      const matches = content.match(pattern) || [];
-      totalSandboxBlocks += matches.length;
+    
+    // Analyze each line with context validation
+    lines.forEach((line, lineIndex) => {
+      if (this.isLegitimateCode(line, filePath, lineIndex, lines)) {
+        return; // Skip this line
+      }
+
+      sandboxPatterns.forEach(({ pattern, weight }) => {
+        const matches = line.match(pattern) || [];
+        totalSandboxBlocks += matches.length * weight;
+      });
     });
     
-    this.sandboxBlocks += totalSandboxBlocks;
+    // Round to nearest integer and add to total
+    this.sandboxBlocks += Math.round(totalSandboxBlocks);
 
     // Check for traditional paired sandbox blocks
     const sandboxStartMatches = content.match(/\/\/\s*SANDBOX_START/gi) || [];
