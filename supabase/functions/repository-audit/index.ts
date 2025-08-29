@@ -76,7 +76,11 @@ class RepositoryAuditor {
       const filePaths: string[] = [];
 
       for (const item of contents) {
-        if (item.type === 'file' && (item.name.endsWith('.ts') || item.name.endsWith('.tsx') || item.name.endsWith('.js') || item.name.endsWith('.jsx'))) {
+        if (item.type === 'file' && (
+          item.name.endsWith('.ts') || item.name.endsWith('.tsx') || 
+          item.name.endsWith('.js') || item.name.endsWith('.jsx') ||
+          item.name.endsWith('.json') || item.name.endsWith('.md')
+        )) {
           filePaths.push(item.path);
         } else if (item.type === 'dir' && !item.name.startsWith('.') && item.name !== 'node_modules') {
           const subFiles = await this.scanDirectory(item.path);
@@ -94,10 +98,38 @@ class RepositoryAuditor {
     this.filesScanned++;
     const lines = content.split('\n');
 
-    // Count sandbox blocks
+    // Enhanced sandbox block detection patterns
+    const sandboxPatterns = [
+      /\/\/\s*SANDBOX_START/gi,
+      /\/\*\s*SANDBOX_START\s*\*\//gi,
+      /\/\/\s*TEMP_START/gi,
+      /\/\*\s*TEMP_START\s*\*\//gi,
+      /\/\/\s*DEBUG_START/gi,
+      /\/\*\s*DEBUG_START\s*\*\//gi,
+      /\/\/\s*DEV_START/gi,
+      /\/\*\s*DEV_START\s*\*\//gi,
+      /\/\/\s*@sandbox/gi,
+      /\/\*\s*@sandbox\s*\*\//gi,
+      /\/\/\s*@dev/gi,
+      /\/\*\s*@dev\s*\*\//gi,
+      /\/\/\s*TODO.*remove/gi,
+      /\/\*\s*TODO.*replace.*\*\//gi,
+      /const\s+(temp|tmp|mock|placeholder)\w*/gi,
+      /let\s+(temp|tmp|mock|placeholder)\w*/gi,
+      /console\.log\(/gi
+    ];
+
+    let totalSandboxBlocks = 0;
+    sandboxPatterns.forEach(pattern => {
+      const matches = content.match(pattern) || [];
+      totalSandboxBlocks += matches.length;
+    });
+    
+    this.sandboxBlocks += totalSandboxBlocks;
+
+    // Check for traditional paired sandbox blocks
     const sandboxStartMatches = content.match(/\/\/\s*SANDBOX_START/gi) || [];
     const sandboxEndMatches = content.match(/\/\/\s*SANDBOX_END/gi) || [];
-    this.sandboxBlocks += sandboxStartMatches.length;
 
     if (sandboxStartMatches.length !== sandboxEndMatches.length) {
       this.checks.push({
